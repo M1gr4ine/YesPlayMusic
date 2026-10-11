@@ -6,6 +6,41 @@ pub struct Rect {
     pub height: i32,
 }
 
+pub fn taskbar_snap_ease(progress: f64) -> f64 {
+    let progress = progress.clamp(0.0, 1.0);
+    let axis = |t: f64, first: f64, second: f64| {
+        let inverse = 1.0 - t;
+        3.0 * inverse * inverse * t * first + 3.0 * inverse * t * t * second + t * t * t
+    };
+    let (mut low, mut high) = (0.0, 1.0);
+    for _ in 0..24 {
+        let middle = (low + high) / 2.0;
+        if axis(middle, 0.77, 0.175) < progress {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    axis((low + high) / 2.0, 0.0, 1.0)
+}
+
+pub fn interpolate_rect(from: Rect, to: Rect, progress: f64) -> Option<Rect> {
+    if !from.is_valid() || !to.is_valid() || !progress.is_finite() {
+        return None;
+    }
+    let eased = taskbar_snap_ease(progress);
+    let interpolate = |start: i32, end: i32| {
+        (f64::from(start) + (f64::from(end) - f64::from(start)) * eased).round() as i32
+    };
+    let rect = Rect {
+        x: interpolate(from.x, to.x),
+        y: interpolate(from.y, to.y),
+        width: interpolate(from.width, to.width),
+        height: interpolate(from.height, to.height),
+    };
+    rect.is_valid().then_some(rect)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ForegroundSafety {
     Clear,
@@ -16,8 +51,90 @@ pub enum ForegroundSafety {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DockMode {
     Floating,
+    Docking,
     Docked,
+    Undocking,
     Waiting,
+}
+
+pub const OVERLAY_SNAPSHOT_MAX_BYTES: usize = 16_384;
+
+pub fn validate_overlay_snapshot(snapshot: &serde_json::Value) -> Result<(), &'static str> {
+    let object = snapshot.as_object().ok_or("snapshot must be an object")?;
+    if serde_json::to_vec(snapshot)
+        .map_err(|_| "snapshot is not serializable")?
+        .len()
+        > OVERLAY_SNAPSHOT_MAX_BYTES
+    {
+        return Err("snapshot is too large");
+    }
+    const STRINGS: &[(&str, usize)] = &[
+        ("artwork", 4_096),
+        ("trackTitle", 512),
+        ("artistName", 512),
+        ("lyric", 2_048),
+        ("emptyKind", 16),
+        ("emptyLabel", 256),
+        ("elapsedLabel", 32),
+        ("durationLabel", 32),
+        ("locale", 32),
+    ];
+    const NUMBERS: &[&str] = &["progress", "duration"];
+    const BOOLEANS: &[&str] = &["playing", "shuffle", "reducedMotion"];
+    for key in object.keys() {
+        if !STRINGS.iter().any(|(allowed, _)| allowed == key)
+            && !NUMBERS.contains(&key.as_str())
+            && !BOOLEANS.contains(&key.as_str())
+        {
+            return Err("snapshot contains an unsupported field");
+        }
+    }
+    for (key, max_len) in STRINGS {
+        let value = object.get(*key).ok_or("snapshot is missing a field")?;
+        if *key == "emptyKind" && value.is_null() {
+            continue;
+        }
+        let text = value.as_str().ok_or("snapshot string field is invalid")?;
+        if text.len() > *max_len
+            || text.chars().any(|character| {
+                character.is_control()
+                    && !(*key == "lyric" && matches!(character, '\n' | '\r' | '\t'))
+            })
+            || (*key == "emptyKind" && !matches!(text, "loading" | "track"))
+        {
+            return Err("snapshot string field is invalid");
+        }
+    }
+    for key in NUMBERS {
+        let value = object.get(*key).ok_or("snapshot is missing a field")?;
+        let number = value.as_f64().ok_or("snapshot number field is invalid")?;
+        if !number.is_finite() || !(0.0..=86_400.0).contains(&number) {
+            return Err("snapshot number field is outside the supported range");
+        }
+    }
+    for key in BOOLEANS {
+        if !object
+            .get(*key)
+            .ok_or("snapshot is missing a field")?
+            .is_boolean()
+        {
+            return Err("snapshot boolean field is invalid");
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_overlay_action(action: &str, value: Option<f64>) -> Result<(), &'static str> {
+    match action {
+        "previous" | "play" | "next" | "shuffle" | "undock" | "close" if value.is_none() => Ok(()),
+        "seek"
+            if value
+                .is_some_and(|value| value.is_finite() && (0.0..=86_400.0).contains(&value)) =>
+        {
+            Ok(())
+        }
+        _ => Err("overlay action is invalid"),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,8 +227,9 @@ pub fn should_persist_frame(compact: bool, docked: bool, transitioning: bool) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_mode_is_valid, dock_decision, dock_target, live_compact_mode_is_valid,
-        near_taskbar, should_persist_frame, DockMode, ForegroundSafety, Rect,
+        compact_mode_is_valid, dock_decision, dock_target, interpolate_rect,
+        live_compact_mode_is_valid, near_taskbar, should_persist_frame, taskbar_snap_ease,
+        validate_overlay_action, validate_overlay_snapshot, DockMode, ForegroundSafety, Rect,
     };
 
     #[test]
@@ -306,6 +424,77 @@ mod tests {
         assert!(!should_persist_frame(false, true, false));
         assert!(!should_persist_frame(false, false, true));
         assert!(should_persist_frame(false, false, false));
+    }
+
+    #[test]
+    fn overlay_snapshot_accepts_only_bounded_presentation_fields() {
+        let valid = serde_json::json!({
+            "artwork": "https://example.test/cover.jpg",
+            "trackTitle": "Song",
+            "artistName": "Artist",
+            "lyric": "Line",
+            "emptyKind": null,
+            "emptyLabel": "",
+            "progress": 10.5,
+            "duration": 180.0,
+            "elapsedLabel": "0:10",
+            "durationLabel": "3:00",
+            "playing": true,
+            "shuffle": false,
+            "locale": "zh-CN",
+            "reducedMotion": false
+        });
+        assert!(validate_overlay_snapshot(&valid).is_ok());
+        assert!(validate_overlay_snapshot(&serde_json::json!({"accountToken":"secret"})).is_err());
+        assert!(validate_overlay_snapshot(&serde_json::json!({"trackTitle": 42})).is_err());
+        assert!(validate_overlay_snapshot(&serde_json::json!({"progress": -1})).is_err());
+        assert!(validate_overlay_snapshot(&serde_json::json!({})).is_err());
+        assert!(validate_overlay_snapshot(&serde_json::json!({
+            "artwork": "", "trackTitle": "", "artistName": "", "lyric": "",
+            "emptyKind": "unexpected", "emptyLabel": "", "progress": 0,
+            "duration": 0, "elapsedLabel": "", "durationLabel": "",
+            "playing": false, "shuffle": false, "locale": "en-US",
+            "reducedMotion": false
+        }))
+        .is_err());
+        assert!(
+            validate_overlay_snapshot(&serde_json::json!({"lyric": "x".repeat(2_049)})).is_err()
+        );
+    }
+
+    #[test]
+    fn overlay_actions_are_allowlisted_and_seek_is_bounded() {
+        for action in ["previous", "play", "next", "shuffle", "undock", "close"] {
+            assert!(validate_overlay_action(action, None).is_ok(), "{action}");
+        }
+        assert!(validate_overlay_action("seek", Some(30.0)).is_ok());
+        assert!(validate_overlay_action("seek", Some(f64::NAN)).is_err());
+        assert!(validate_overlay_action("seek", Some(-1.0)).is_err());
+        assert!(validate_overlay_action("close", Some(1.0)).is_err());
+        assert!(validate_overlay_action("eval", None).is_err());
+    }
+
+    #[test]
+    fn overlay_animation_uses_the_electron_cubic_bezier_and_exact_endpoints() {
+        let from = Rect {
+            x: 100,
+            y: 200,
+            width: 900,
+            height: 150,
+        };
+        let to = Rect {
+            x: 700,
+            y: 1_000,
+            width: 380,
+            height: 48,
+        };
+        assert_eq!(interpolate_rect(from, to, 0.0), Some(from));
+        assert_eq!(interpolate_rect(from, to, 1.0), Some(to));
+        let middle = interpolate_rect(from, to, 0.5).unwrap();
+        assert!(middle.x > from.x && middle.x < to.x);
+        assert!(middle.y > from.y && middle.y < to.y);
+        assert!(taskbar_snap_ease(0.5) > 0.5);
+        assert_eq!(interpolate_rect(from, to, f64::NAN), None);
     }
 
     #[test]

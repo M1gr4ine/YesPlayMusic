@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "taskbar-overlay",
+  "description": "Presentation-only taskbar lyrics window",
+  "windows": ["taskbar-lyrics"],
+  "remote": {
+    "urls": ["http://127.0.0.1:1420/*", "http://127.0.0.1:28232/*"]
+  },
+  "permissions": ["core:default", "core:event:allow-listen"]
+}

@@ -5,6 +5,7 @@ import { getAppStore } from '@/stores/accessor';
 import { normalizePersistedLocale } from '@/locale/catalog';
 import type { LocaleCode } from '@/locale/catalog';
 import type { Track, TrackPrivilege } from '@/types/domain';
+export { formatTrackTime } from './trackTime';
 
 interface ThemeColors {
   primary: string;
@@ -338,11 +339,4 @@ export function bytesToSize(bytes: number): string {
   else if (bytes < gigaBytes)
     return (bytes / megaBytes).toFixed(decimal) + ' MB';
   else return (bytes / gigaBytes).toFixed(decimal) + ' GB';
-}
-
-export function formatTrackTime(value: number | null | undefined): string {
-  if (!value) return '';
-  const min = ~~(value / 60);
-  const sec = (~~(value % 60)).toString().padStart(2, '0');
-  return `${min}:${sec}`;
 }

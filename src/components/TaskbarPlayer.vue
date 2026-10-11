@@ -12,8 +12,8 @@
             class="icon-button no-drag mini-taskbar-dock"
             data-action="return-floating"
             type="button"
-            :aria-label="locale.t('common.floatMiniPlayer')"
-            :title="locale.t('common.floatMiniPlayer')"
+            :aria-label="locale.t('common.floatMiniPlayer', translateLabel)"
+            :title="locale.t('common.floatMiniPlayer', translateLabel)"
             @click.stop="emit('undock')"
           >
             <svg
@@ -30,8 +30,8 @@
             class="icon-button no-drag"
             data-action="close"
             type="button"
-            :aria-label="locale.t('common.closeWindow')"
-            :title="locale.t('common.closeWindow')"
+            :aria-label="locale.t('common.closeWindow', translateLabel)"
+            :title="locale.t('common.closeWindow', translateLabel)"
             @click.stop="emit('close')"
           >
             <svg
@@ -279,7 +279,8 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
-import locale from '@/locale';
+import locale from '@/utils/taskbar/locale';
+import type { MessageKey } from '@/locale/catalog';
 
 const props = defineProps<{
   artwork: string;
@@ -311,6 +312,7 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
+const translateLabel = (key: MessageKey): string => String(t(key));
 const progressPercent = computed(() => {
   if (props.duration <= 0) return 0;
   return Math.min(100, Math.max(0, (props.progress / props.duration) * 100));

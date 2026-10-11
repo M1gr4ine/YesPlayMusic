@@ -2632,6 +2632,8 @@ fn create_main_window(
             }
         })
         .build()?;
+    #[cfg(target_os = "windows")]
+    let overlay = create_taskbar_overlay(app.handle(), proxy_relay_enabled)?;
     if let Some(position) = preferences.position {
         window.set_position(PhysicalPosition::new(position.x, position.y))?;
     }
@@ -2641,7 +2643,7 @@ fn create_main_window(
 
     #[cfg(target_os = "windows")]
     app.state::<taskbar_docking::TaskbarDockController>()
-        .bind_and_start(window.clone());
+        .bind_and_start(window.clone(), overlay);
 
     let window_for_events = window.clone();
     window.on_window_event(move |event| {
@@ -2757,6 +2759,90 @@ fn create_main_window(
         }
     });
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn create_taskbar_overlay(
+    app: &AppHandle,
+    proxy_relay_enabled: bool,
+) -> Result<WebviewWindow, Box<dyn std::error::Error>> {
+    let port = if cfg!(debug_assertions) {
+        DEV_WEB_PORT
+    } else {
+        RELEASE_WEB_PORT
+    };
+    let url = format!("http://127.0.0.1:{port}/#/taskbar-overlay").parse()?;
+    let mut builder = WebviewWindowBuilder::new(app, "taskbar-lyrics", WebviewUrl::External(url))
+        .title("YesPlayMusic lyrics")
+        .inner_size(1.0, 1.0)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .resizable(false)
+        .maximizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focusable(false)
+        .visible(false);
+    if proxy_relay_enabled {
+        let proxy = format!("http://127.0.0.1:{WEBVIEW_PROXY_RELAY_PORT}").parse()?;
+        builder = builder.proxy_url(proxy);
+    }
+    let app_handle = app.clone();
+    let overlay = builder.build()?;
+    overlay.on_window_event(move |event| match event {
+        WindowEvent::CloseRequested { api, .. } => {
+            api.prevent_close();
+            if let Some(controller) =
+                app_handle.try_state::<taskbar_docking::TaskbarDockController>()
+            {
+                controller.request_hide();
+            }
+        }
+        WindowEvent::Destroyed => {
+            let should_recreate = app_handle
+                .try_state::<taskbar_docking::TaskbarDockController>()
+                .is_some_and(|controller| controller.overlay_destroyed());
+            if !should_recreate {
+                return;
+            }
+            let app_handle = app_handle.clone();
+            thread::spawn(move || {
+                let mut retry_delay_ms = 100_u64;
+                loop {
+                    thread::sleep(Duration::from_millis(retry_delay_ms));
+                    let Some(controller) = app_handle
+                        .try_state::<taskbar_docking::TaskbarDockController>()
+                    else {
+                        break;
+                    };
+                    if app_handle.get_webview_window("main").is_none()
+                        || controller.is_stopping()
+                    {
+                        break;
+                    }
+                    if app_handle.get_webview_window("taskbar-lyrics").is_some() {
+                        break;
+                    }
+                    if !controller.overlay_reset_complete() {
+                        retry_delay_ms = (retry_delay_ms * 2).min(2_000);
+                        continue;
+                    }
+                    match create_taskbar_overlay(&app_handle, proxy_relay_enabled) {
+                        Ok(_) => break,
+                        Err(error) => {
+                            eprintln!(
+                                "[taskbar-docking] could not recreate overlay window; retrying: {error}"
+                            );
+                            retry_delay_ms = (retry_delay_ms * 2).min(2_000);
+                        }
+                    }
+                }
+            });
+        }
+        _ => {}
+    });
+    Ok(overlay)
 }
 
 fn main() {
@@ -3025,7 +3111,11 @@ fn main() {
         updater_configured,
         prepare_for_update,
         taskbar_docking::set_taskbar_docking,
-        taskbar_docking::sync_taskbar_compact_mode
+        taskbar_docking::sync_taskbar_compact_mode,
+        taskbar_docking::publish_taskbar_overlay_snapshot,
+        taskbar_docking::taskbar_overlay_ready,
+        taskbar_docking::taskbar_overlay_visual_ready,
+        taskbar_docking::taskbar_overlay_action
     ]);
 
     #[cfg(not(target_os = "windows"))]

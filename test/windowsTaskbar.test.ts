@@ -3,6 +3,7 @@ import {
   applyTaskbarDockState,
   canPersistCompactWindowFrame,
   getTaskbarDockState,
+  hasTaskbarDockIntent,
   invokeTaskbarDockCommand,
   isTaskbarDockingAvailable,
   normalizeTaskbarDockState,
@@ -166,6 +167,22 @@ test('the taskbar return button appears only after docking completes', () => {
       enabled: true,
     })
   ).toBe(true);
+});
+
+test('docking transitions retain dock intent and block compact-frame actions', () => {
+  for (const mode of ['docking', 'undocking'] as const) {
+    const state = {
+      mode,
+      suspended: false,
+      dockError: '',
+      enabled: false,
+    };
+
+    expect(normalizeTaskbarDockState(state)).toEqual(state);
+    expect(hasTaskbarDockIntent(state)).toBe(true);
+    expect(canPersistCompactWindowFrame(state)).toBe(false);
+    expect(shouldShowTaskbarReturnButton(state)).toBe(false);
+  }
 });
 
 test('compact mode sync forwards its native argument and refreshes cached state', async () => {

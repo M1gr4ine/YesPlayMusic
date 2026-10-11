@@ -1,31 +1,36 @@
-# Windows taskbar docking for the compact player
+# Windows compact-player taskbar docking
 
-This feature adds taskbar attachment to the existing compact main-window player. It does not create another lyrics window or replace its player interface. Enter the existing compact mode by reducing the main window's height below 340 logical pixels while it is neither maximized nor fullscreen. The native controller validates the current window state before attaching; a renderer compact-mode flag cannot bypass this check.
+On Windows, drag a normal compact player close to a supported horizontal taskbar. A highlighted outline uses the customized Electron overlay's 240ms curve to travel into the taskbar; after that animation, only the taskbar strip is visible on the desktop. Clicking its upward arrow reverses the outline transition and then restores the compact player at its original size and position. Ordinary compact mode has no additional docking button. Reduced motion replaces geometric travel with a short fade.
 
-On Windows, move the compact player close to a supported horizontal taskbar to attach it automatically. A floating compact player has no docking button. The dock uses a fixed 380 logical-pixel width and the taskbar's actual height. The attached layout copies the customized Electron taskbar overlay: a full-height square cover, 10-pixel title and artist on the top row, a 14-pixel single lyric line below, four transport controls, separate return and close buttons, and a one-pixel progress line beginning after the cover. Its background is transparent and has no frame or rounded corners. While docked, native non-client edge bits, Tao's undecorated shadow insets, and its cached resize overlay are disabled. Detach restores the saved floating frame and resize state without activating or raising the window. Once attached, the upward-arrow button returns it to the saved floating compact frame. Double-clicking the attached player does not expand it into the main player or queue. Once floating again, its existing double-click expansion behavior is retained.
+## Window and playback ownership
 
-While attached, fullscreen foreground windows on the same monitor hide the compact player automatically. Reopening during fullscreen retains the dock request and stays hidden; the player recovers without taking focus after fullscreen ends. Missing or unreadable native probes retain that intent and stay hidden. Explicitly hiding or closing the player remains respected.
+The real main HWND stays top-level. The controller never reparents, reshapes or changes the decorations, resize policy or shadow of the real player. Its WebView retains the existing playback session while an independent `taskbar-lyrics` window provides the animation and attached content. Only that dedicated, transparent, borderless, non-resizable, shadowless window is parented into Explorer. It uses fixed 380 logical-pixel width and the selected taskbar's real height.
 
-All attachment, native probing and helper startup are Windows-only. macOS and Linux retain the existing compact-window behavior.
+The overlay entry does not mount the main App or initialize Pinia, Player, migrations or account state. The existing player supplies bounded presentation snapshots; validated overlay actions return to that player. Thus progress, lyrics and play/shuffle/seek controls use the same playback session.
 
-## Building and verification
+The attached appearance matches the customized Electron taskbar layout: a full-height square cover, 10-pixel title and artist on the top row, a 14-pixel single lyric below, four transport controls, separate return and close buttons, and a one-pixel progress line beginning after the cover. The background and native outer edges are transparent; the attached outer and client rectangles coincide.
 
-Use the normal Windows Tauri build. The included C# source is compiled by the Windows .NET Framework compiler and bundled only for Windows. Its STA helper uses documented Win32 APIs and the taskbar's accessibility interface; it does not inject code into Explorer.
+## Behavior and recovery
 
-Run the repository's Bun tests, type checks and renderer build, plus the Rust workspace tests, clippy and formatting checks. Native runtime verification additionally checks actual HWND parenting and geometry, fullscreen hide/recovery, explicit hide, and restoration before expanding or exiting. Geometry/state unit tests do not replace native Windows verification.
+Dock status is floating, docking, docked, undocking or waiting. Transitions block accidental compact expansion and stale frame persistence. The real player disappears from the desktop before the outline appears and returns only after the reverse animation finishes. An actual renderer-ready and visual-ready handshake prevents showing an uninitialized overlay.
 
-## Native runtime checklist
+Fullscreen or unreadable taskbar probes suppress the independent layer while preserving attachment intent. Single-instance or tray reopening during fullscreen keeps it suppressed. Recovery resumes only the taskbar layer without taking focus. Helper failures recover the dedicated overlay without rebuilding or changing the real player. Overlay close follows the original lyrics behavior: hide the visual layer while playback continues; an explicit reopen restores it.
 
-Use a separate WebView2 user-data directory and skip legacy Electron import in the test profile. Run one host/sidecar at a time because the application uses fixed loopback ports. Keep the installed Electron application and other test sessions untouched.
+Non-Windows builds keep their existing behavior. The helper is compiled and bundled only on Windows.
 
-- Start with a legal floating compact frame such as 900 by 150 logical pixels at an arbitrary screen position. Move it near a supported horizontal taskbar and wait for automatic attachment. Verify that the floating state has no docking button and that the return-to-floating arrow appears only after docking. Inspect the same main HWND: its parent must be the selected taskbar, its content width must be 380 logical pixels, and its height must fit the real taskbar. Its native outer and client rectangles must coincide, with caption/resize-border style bits and extended edge style bits cleared only while docked.
-- Force the initial compact-state IPC to reject in an isolated test renderer. Verify the UI remains unready, then physically resize it to another legal compact size. The retry must preserve the event listener and update the attached layout when the native Docked event arrives.
-- Detach and compare the native parent, styles, physical screen rectangle, logical compact size and renderer frame memory with the original values. Repeat on a supported secondary horizontal taskbar.
-- Drag close to the taskbar and check automatic attachment after movement settles. An unsupported layout or insufficient free space must show a waiting reason without covering shell controls.
-- Put a real fullscreen test window in the foreground on the dock's monitor. Verify native visibility is false, reopen through the normal tray/single-instance path, then close the fullscreen window and verify automatic recovery without foreground focus changing to the player. Also check that another monitor's taskbar observation still has valid monitor bounds.
-- Exercise native minimize, explicit close-to-tray, and their ordinary reopen paths. They must remain hidden/minimized through polling until the user asks to reopen.
-- Stop only this host's native helper and confirm bounded recovery restores the same player HWND and attachment intent. Do not restart Explorer or another session's helper for this check.
-- Double-click the attached player and verify it stays docked and compact. Click its return-to-floating button and verify the original compact frame, parent and styles are restored. Double-click the floating compact player and verify its existing browse transition still works. Quit while docked and verify the native frame is restored before exit; the host records the verified restore in its diagnostic log.
-- Attempt to enable docking or report compact mode from a normal, maximized or fullscreen main window. Native validation must reject it without reparenting the main HWND.
+## Verification
 
-Windows native tests are distinct from model/unit tests. A source review of the Windows guards also does not constitute a macOS or Linux runtime test.
+Run Bun tests, full type checks and the production renderer build. For Rust changes, run workspace tests, Clippy and fmt. The local Windows environment has two known non-admin symbolic-link EPERM tests; report those explicitly rather than excluding them.
+
+Native tests must identify the main HWND and the `taskbar-lyrics` HWND separately:
+
+- Start with a valid floating compact frame (for example 900 by 150). Verify the main HWND remains parentless, its native styles and rectangle stay unchanged throughout both directions, and ordinary compact mode has no additional button.
+- Sample actual native visibility during forward and reverse transitions. Main must be absent by the first visible outline frame and remain absent until the reverse outline is gone. Verify the original curve/duration and the reduced-motion variant.
+- Verify only the dedicated overlay is attached to the selected taskbar at 380 DIP by its actual height, with coincident native outer/client rectangles and no non-client edge bits.
+- Test on another supported monitor. Verify true hidden-player playback progress and matching snapshots, and actual play/shuffle/seek button delivery to the one existing player.
+- Exercise rapid requests and verify stale transition generations cannot reattach or reveal a discarded layer.
+- Make a known foreground fullscreen fixture active, then verify the taskbar layer stays hidden, including through reopening, and recovers without taking focus.
+- Stop only this host's exact helper identified by its executable, host PID and overlay HWND; verify bounded independent-overlay recovery.
+- Verify close/reopen intent, ordinary compact double-click expansion, and exit teardown. No taskbar HWND should remain owned by the exiting host.
+
+State/geometry unit tests supplement these tests; they cannot establish native HWND behavior or animation visibility timing.
