@@ -342,11 +342,27 @@
             </div>
           </div>
           <div class="right">
-            <input
-              v-model="unmQQCookie"
-              class="text-input margin-right-0"
-              placeholder="uin=..; qm_keyst=..;"
-            />
+            <div class="qq-cookie-controls">
+              <input
+                v-model="unmQQCookie"
+                class="text-input margin-right-0"
+                placeholder="uin=..; qm_keyst=..;"
+              />
+              <button
+                v-if="canQQMusicQuickLogin"
+                class="qq-quick-login-button"
+                :disabled="qqMusicLoginActive"
+                @click="startQQMusicLogin"
+              >
+                {{
+                  $t(
+                    qqMusicLoginActive
+                      ? 'settings.unm.cookie.qqQuickLoginBusy'
+                      : 'settings.unm.cookie.qqQuickLogin'
+                  )
+                }}
+              </button>
+            </div>
           </div>
         </div>
 
@@ -822,6 +838,7 @@ import { stopInterval } from '@/utils/mediaLifecycle';
 import {
   isLinux as platformIsLinux,
   isMac as platformIsMac,
+  isWindows as platformIsWindows,
 } from '@/utils/platform';
 import pkg from '../../package.json';
 import locale from '@/locale';
@@ -833,6 +850,7 @@ import { getRecordedShortcutKeyIdentity } from '@/utils/shortcuts';
 import type { RecordedShortcutKey } from '@/utils/shortcuts';
 import {
   decodeLastfmState,
+  decodeStoredRecord,
   normalizeLyricFontSize,
   normalizeMusicQuality,
   readStoredJson,
@@ -844,6 +862,10 @@ import {
   installPendingAppUpdate,
 } from '@/services/appUpdater';
 import { syncDesktopSettings } from '@/services/desktopSettings';
+import {
+  persistQQMusicLoginCandidate,
+  startDesktopQQMusicLogin,
+} from '@/services/qqMusicLogin';
 import {
   getSharedCacheStatus,
   migrateIndexedDbTracksToSharedCache,
@@ -911,6 +933,9 @@ export default defineComponent({
       lastfmChecker: null as ReturnType<typeof setInterval> | null,
       lastfmAuthorizationCleanup: null as (() => void) | null,
       lastfmAuthorizationEpoch: 0,
+      qqMusicLoginActive: false,
+      qqMusicLoginCleanup: null as (() => void) | null,
+      qqMusicLoginEpoch: 0,
       updaterState: 'idle' as AppUpdaterState,
       updaterVersion: '',
       updaterNotes: '',
@@ -930,6 +955,9 @@ export default defineComponent({
   },
   computed: {
     ...mapState(useAppStore, ['player', 'settings', 'data', 'lastfm']),
+    canQQMusicQuickLogin(): boolean {
+      return isDesktopRuntime && platformIsWindows;
+    },
     langOptions(): SelectOption[] {
       return this.localeOptions.map(option => ({
         value: option.code,
@@ -1790,6 +1818,7 @@ export default defineComponent({
   beforeUnmount() {
     this.stopLastfmChecker();
     this.stopLastfmAuthorization();
+    this.stopQQMusicLogin();
     void clearPendingAppUpdate();
   },
   methods: {
@@ -2041,6 +2070,90 @@ export default defineComponent({
       this.lastfmAuthorizationEpoch += 1;
       this.lastfmAuthorizationCleanup?.();
       this.lastfmAuthorizationCleanup = null;
+    },
+    stopQQMusicLogin() {
+      this.qqMusicLoginEpoch += 1;
+      this.qqMusicLoginCleanup?.();
+      this.qqMusicLoginCleanup = null;
+      this.qqMusicLoginActive = false;
+    },
+    async startQQMusicLogin() {
+      if (!this.canQQMusicQuickLogin || this.qqMusicLoginActive) return;
+      const epoch = ++this.qqMusicLoginEpoch;
+      const expectedCurrent = this.settings.unmQQCookie ?? '';
+      let closed = false;
+      this.qqMusicLoginActive = true;
+
+      try {
+        const cleanup = await startDesktopQQMusicLogin({
+          onCandidate: candidate => {
+            if (epoch !== this.qqMusicLoginEpoch) return 'conflict';
+            return persistQQMusicLoginCandidate(candidate, expectedCurrent, {
+              getCurrent: () => this.settings.unmQQCookie,
+              getPersisted: () => {
+                const persisted = decodeStoredRecord(
+                  readStoredJson(localStorage, 'settings')
+                )['unmQQCookie'];
+                return typeof persisted === 'string' ? persisted : undefined;
+              },
+              update: value => {
+                this.updateSettings({
+                  key: 'unmQQCookie',
+                  value: value || undefined,
+                });
+              },
+            });
+          },
+          onComplete: candidate => {
+            if (epoch !== this.qqMusicLoginEpoch) return;
+            this.showToast(
+              locale.t(
+                candidate.canRefresh
+                  ? 'settings.unm.cookie.qqQuickLoginRefresh'
+                  : 'settings.unm.cookie.qqQuickLoginSuccess'
+              )
+            );
+          },
+          onNativeRejected: candidate => {
+            if (epoch !== this.qqMusicLoginEpoch) return;
+            if (this.settings.unmQQCookie !== candidate.value) return;
+            this.updateSettings({
+              key: 'unmQQCookie',
+              value: expectedCurrent || undefined,
+            });
+          },
+          onClosed: () => {
+            if (epoch !== this.qqMusicLoginEpoch) return;
+            closed = true;
+            this.qqMusicLoginActive = false;
+            this.qqMusicLoginCleanup = null;
+          },
+          onError: () => {
+            if (epoch !== this.qqMusicLoginEpoch) return;
+            this.showToast(locale.t('settings.unm.cookie.qqQuickLoginFailed'));
+          },
+          onRejected: result => {
+            if (epoch !== this.qqMusicLoginEpoch) return;
+            this.showToast(
+              locale.t(
+                result === 'conflict'
+                  ? 'settings.unm.cookie.qqQuickLoginConflict'
+                  : 'settings.unm.cookie.qqQuickLoginFailed'
+              )
+            );
+          },
+        });
+        if (epoch !== this.qqMusicLoginEpoch || closed) {
+          cleanup();
+          return;
+        }
+        this.qqMusicLoginCleanup = cleanup;
+      } catch {
+        if (epoch !== this.qqMusicLoginEpoch) return;
+        this.qqMusicLoginActive = false;
+        this.qqMusicLoginCleanup = null;
+        this.showToast(locale.t('settings.unm.cookie.qqQuickLoginFailed'));
+      }
     },
     async sendProxyConfig() {
       if (this.proxyProtocol === 'noProxy') return;
@@ -2325,6 +2438,19 @@ button {
 
 input.text-input.margin-right-0 {
   margin-right: 0;
+}
+.qq-cookie-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.qq-quick-login-button {
+  white-space: nowrap;
+}
+.qq-quick-login-button:disabled {
+  cursor: default;
+  opacity: 0.55;
+  transform: none;
 }
 input.text-input {
   background: var(--color-secondary-bg);

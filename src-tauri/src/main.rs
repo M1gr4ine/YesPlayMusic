@@ -10,6 +10,7 @@ mod legacy_renderer_data;
 mod linux_media;
 #[cfg(target_os = "macos")]
 mod macos_media_controls;
+mod qq_music_login;
 mod window_preferences;
 
 use std::{
@@ -2712,6 +2713,7 @@ fn main() {
                 DesktopPreferences::default(),
             )));
             app.manage(ClosePromptState(AtomicBool::new(false)));
+            app.manage(qq_music_login::QqMusicLoginState::default());
             app.manage(TrayMenuState(Mutex::new(TrayMenuRegistration::default())));
             app.manage(TrayAvailabilityState(AtomicBool::new(false)));
             #[cfg(target_os = "macos")]
@@ -2869,7 +2871,9 @@ fn main() {
             read_legacy_settings,
             legacy_renderer_data::import_legacy_renderer_data,
             updater_configured,
-            prepare_for_update
+            prepare_for_update,
+            qq_music_login::open_qq_music_login,
+            qq_music_login::finish_qq_music_login
         ])
         .build(context)
         .expect("failed to build Tauri application");

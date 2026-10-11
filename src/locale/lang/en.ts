@@ -261,6 +261,14 @@ export default {
         order: 'Order Priority',
       },
       cookie: {
+        qqQuickLogin: 'Quick login',
+        qqQuickLoginBusy: 'Waiting for QQ Music…',
+        qqQuickLoginSuccess: 'QQ Music login saved.',
+        qqQuickLoginRefresh: 'QQ Music login saved with refresh access.',
+        qqQuickLoginConflict:
+          'The QQ cookie changed during login. Your edit was kept.',
+        qqQuickLoginFailed:
+          'Unable to save QQ Music login. Your existing cookie was kept.',
         joox: 'Cookie for Joox use',
         qq: 'Cookie for QQ use',
         desc1: 'Click here for the configuration instruction. ',

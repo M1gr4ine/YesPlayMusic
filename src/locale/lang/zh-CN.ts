@@ -262,6 +262,12 @@ export default {
         order: '顺序优先',
       },
       cookie: {
+        qqQuickLogin: '快速登录',
+        qqQuickLoginBusy: '正在等待 QQ 音乐登录…',
+        qqQuickLoginSuccess: 'QQ 音乐登录信息已保存。',
+        qqQuickLoginRefresh: 'QQ 音乐登录信息已保存，可自动刷新。',
+        qqQuickLoginConflict: '登录期间 QQ Cookie 已更改，已保留你的编辑。',
+        qqQuickLoginFailed: '无法保存 QQ 音乐登录信息，已保留原 Cookie。',
         joox: 'Joox 引擎的 Cookie',
         qq: 'QQ 引擎的 Cookie',
         desc1: '设置说明请参见此处',
