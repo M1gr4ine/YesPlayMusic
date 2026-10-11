@@ -1,7 +1,5 @@
-// Only these mini-player elements keep their native pointer behavior.
-// .mini-copyable wraps text tightly so only the text remains selectable.
-export const MINI_WINDOW_INTERACTIVE_SELECTOR = [
-  '.mini-copyable',
+// Keep controls interactive even when Windows text is used for window dragging.
+const MINI_WINDOW_CONTROL_SELECTOR = [
   '.mini-controls',
   '.mini-progress-track',
   'button',
@@ -11,6 +9,13 @@ export const MINI_WINDOW_INTERACTIVE_SELECTOR = [
   'select',
   '[contenteditable="true"]',
 ].join(', ');
+
+export const MINI_WINDOW_INTERACTIVE_SELECTOR =
+  '.mini-copyable, ' + MINI_WINDOW_CONTROL_SELECTOR;
+
+interface MiniWindowGestureOptions {
+  allowTextDrag?: boolean;
+}
 
 interface MiniWindowPointerEvent {
   button?: number;
@@ -42,20 +47,23 @@ function hasClosest(
 }
 
 export function isMiniWindowInteractiveTarget(
-  target: EventTarget | null | undefined
+  target: EventTarget | null | undefined,
+  options: MiniWindowGestureOptions = {}
 ): boolean {
-  return hasClosest(target)
-    ? target.closest(MINI_WINDOW_INTERACTIVE_SELECTOR) !== null
-    : false;
+  const selector = options.allowTextDrag
+    ? MINI_WINDOW_CONTROL_SELECTOR
+    : MINI_WINDOW_INTERACTIVE_SELECTOR;
+  return hasClosest(target) ? target.closest(selector) !== null : false;
 }
 
 export function shouldStartMiniWindowDrag(
-  event: MiniWindowPointerEvent
+  event: MiniWindowPointerEvent,
+  options: MiniWindowGestureOptions = {}
 ): boolean {
   return (
     event?.button === 0 &&
     event?.detail === 1 &&
-    !isMiniWindowInteractiveTarget(event.target)
+    !isMiniWindowInteractiveTarget(event.target, options)
   );
 }
 
@@ -63,9 +71,10 @@ export function shouldStartMiniWindowDrag(
 // existing selection explicitly because preventDefault also blocks that action.
 export function beginMiniWindowDragGesture(
   event: MiniWindowPointerEvent,
-  selection: Selection | null = null
+  selection: Selection | null = null,
+  options: MiniWindowGestureOptions = {}
 ): boolean {
-  if (!shouldStartMiniWindowDrag(event)) return false;
+  if (!shouldStartMiniWindowDrag(event, options)) return false;
   selection?.removeAllRanges?.();
   event.preventDefault?.();
   return true;
@@ -85,8 +94,13 @@ export function hasCrossedMiniWindowDragThreshold(
   );
 }
 
-export function shouldToggleMiniWindow(event: MiniWindowPointerEvent): boolean {
-  return event?.button === 0 && !isMiniWindowInteractiveTarget(event.target);
+export function shouldToggleMiniWindow(
+  event: MiniWindowPointerEvent,
+  options: MiniWindowGestureOptions = {}
+): boolean {
+  return (
+    event?.button === 0 && !isMiniWindowInteractiveTarget(event.target, options)
+  );
 }
 
 export function isMiniWindowSize(size: WindowSize | null | undefined): boolean {

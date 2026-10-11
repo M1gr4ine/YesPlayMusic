@@ -4,6 +4,15 @@
     :class="{
       'user-select-none': userSelectNone,
       'window-hidden': windowHidden,
+      'windows-compact-browse-prepared':
+        compactBrowseEntranceState === 'prepared',
+      'windows-compact-browse-entering':
+        compactBrowseEntranceState === 'entering',
+      'windows-compact-browse-origin-top':
+        compactBrowseEntranceOrigin === 'top',
+      'windows-compact-browse-origin-bottom':
+        compactBrowseEntranceOrigin === 'bottom',
+      'windows-compact-browse-reduced-motion': compactBrowseReducedMotion,
     }"
   >
     <Scrollbar
@@ -52,6 +61,9 @@
     <transition v-if="enablePlayer" name="slide-up">
       <Lyrics
         v-show="showLyrics"
+        :compact-expansion-exit="compactExpansionExit"
+        :compact-expansion-origin="compactExpansionExitOrigin"
+        :compact-expansion-height="compactExpansionExitHeight"
         @expand-compact-window="expandCompactWindow"
       />
     </transition>
@@ -75,7 +87,7 @@ import { useAppStore } from '@/stores/app';
 import { observeDocumentVisibility } from '@/utils/mediaLifecycle';
 import { connectDesktopEvents } from '@/services/desktopBridge';
 import { sendDesktop } from '@/services/desktopTransport';
-import { isDesktopRuntime } from '@/utils/runtime';
+import { isDesktopRuntime, isTauriRuntime } from '@/utils/runtime';
 import {
   COMPACT_RESIZE_SETTLE_MS,
   expandCompactWindow,
@@ -85,6 +97,10 @@ import {
   restoreCompactWindow,
   signalInitialWindowReady,
 } from '@/services/compactWindow';
+import {
+  runStagedCompactExpansion,
+  shouldAutoOpenLyricsOnResize,
+} from '@/services/compactExpansionTransition';
 import { isBarWindowSize, isMiniWindowSize } from '@/utils/miniWindow';
 import {
   isEditableShortcutTarget,
@@ -92,7 +108,7 @@ import {
   runLocalShortcutAction,
 } from '@/services/localShortcuts';
 import { checkForAppUpdateInBackground } from '@/services/appUpdater';
-import { isMac } from '@/utils/platform';
+import { isMac, isWindows } from '@/utils/platform';
 import type { AppShell } from '@/types/appShell';
 import type { RouteLocationRaw } from 'vue-router';
 import { isLastfmCallbackLocation } from '@/services/lastfmAuth';
@@ -132,6 +148,14 @@ export default defineComponent({
       isLastfmCallback: isLastfmCallbackLocation(window.location),
       userSelectNone: false,
       autoOpenedLyrics: false, // Restore lyrics only when compact mode opened it.
+      compactExpansionExit: false,
+      compactExpansionExitOrigin: 'top' as 'top' | 'bottom',
+      compactExpansionExitHeight: 0,
+      windowsCompactExpansionBusy: false,
+      suppressExpandedQueueAutoLyrics: false,
+      compactBrowseEntranceState: 'idle' as 'idle' | 'prepared' | 'entering',
+      compactBrowseEntranceOrigin: 'top' as 'top' | 'bottom',
+      compactBrowseReducedMotion: false,
       compactWindowExpanded:
         !isBarWindowSize({
           width: window.innerWidth,
@@ -171,6 +195,24 @@ export default defineComponent({
     },
     showNavbar() {
       return this.$route.name !== 'lastfmCallback';
+    },
+  },
+  watch: {
+    showLyrics(show: boolean) {
+      if (
+        show &&
+        isWindows &&
+        isTauriRuntime &&
+        !this.autoOpenedLyrics &&
+        !this.windowsCompactExpansionBusy
+      ) {
+        this.suppressExpandedQueueAutoLyrics = false;
+      }
+    },
+    '$route.name'(name: string) {
+      if (name !== 'next' && !this.windowsCompactExpansionBusy) {
+        this.suppressExpandedQueueAutoLyrics = false;
+      }
     },
   },
   created() {
@@ -264,6 +306,92 @@ export default defineComponent({
       await sendDesktop('cancelCloseChoice');
     },
     async expandCompactWindow() {
+      if (isWindows && isTauriRuntime) {
+        if (this.windowsCompactExpansionBusy) return;
+        this.windowsCompactExpansionBusy = true;
+        const previousRoute = this.$route.fullPath;
+        const wasLyricsVisible = this.showLyrics;
+        const wasAutoOpenedLyrics = this.autoOpenedLyrics;
+        const wasSuppressingExpandedQueueAutoLyrics =
+          this.suppressExpandedQueueAutoLyrics;
+        const reducedMotion = window.matchMedia(
+          '(prefers-reduced-motion: reduce)'
+        ).matches;
+        const restorePreviousState = async () => {
+          if (this.$route.fullPath !== previousRoute) {
+            try {
+              await this.$router.push(previousRoute);
+            } catch (_) {
+              // The native window still needs to return to a usable compact state.
+            }
+          }
+          if (wasLyricsVisible && !this.showLyrics) this.toggleLyrics();
+          this.autoOpenedLyrics = wasAutoOpenedLyrics;
+          this.suppressExpandedQueueAutoLyrics =
+            wasSuppressingExpandedQueueAutoLyrics;
+        };
+
+        try {
+          const expanded = await runStagedCompactExpansion(
+            {
+              prepareRoute: async () => {
+                if (this.$route.name !== 'next') {
+                  await this.$router.push({ name: 'next' });
+                }
+                if (this.$route.name !== 'next') {
+                  throw new Error('Unable to prepare the next track page');
+                }
+                await this.$nextTick();
+              },
+              beginExit: () => {
+                this.compactExpansionExitHeight = window.innerHeight;
+                this.compactExpansionExit = true;
+                this.autoOpenedLyrics = false;
+                this.suppressExpandedQueueAutoLyrics = true;
+                this.compactBrowseReducedMotion = reducedMotion;
+                this.compactBrowseEntranceState = 'prepared';
+                if (this.showLyrics) this.toggleLyrics();
+              },
+              expand: () =>
+                expandCompactWindow({
+                  onPrepared: origin => {
+                    this.compactBrowseEntranceOrigin = origin;
+                    this.compactExpansionExitOrigin = origin;
+                  },
+                }),
+              beginEntrance: () => {
+                this.compactBrowseEntranceState = 'entering';
+              },
+              finish: () => {
+                this.compactExpansionExit = false;
+                this.compactExpansionExitHeight = 0;
+                this.compactBrowseEntranceState = 'idle';
+                this.compactBrowseReducedMotion = false;
+              },
+            },
+            { reducedMotion }
+          );
+
+          if (!expanded) {
+            await restorePreviousState();
+            return;
+          }
+          this.compactWindowExpanded = true;
+        } catch (error) {
+          console.warn('[compact-window] expansion transition failed', error);
+          await restorePreviousState();
+        } finally {
+          this.compactExpansionExit = false;
+          this.compactExpansionExitHeight = 0;
+          this.compactBrowseEntranceState = 'idle';
+          this.compactBrowseReducedMotion = false;
+          this.windowsCompactExpansionBusy = false;
+          // Reconcile a resize or Escape that returned to the bar during the entrance.
+          this.handleMiniResize();
+        }
+        return;
+      }
+
       if (!(await expandCompactWindow())) return;
       this.compactWindowExpanded = true;
       if (this.$route.name !== 'next') {
@@ -284,7 +412,21 @@ export default defineComponent({
       // The Esc pill follows the bar/browse split, not the lyrics routing.
       this.compactWindowExpanded =
         !isBarWindowSize(size) && hasRememberedBarFrame();
-      if (isMini && !this.showLyrics) {
+      const windowsFeatureActive = isWindows && isTauriRuntime;
+      if (
+        windowsFeatureActive &&
+        this.suppressExpandedQueueAutoLyrics &&
+        isBarWindowSize(size)
+      ) {
+        this.suppressExpandedQueueAutoLyrics = false;
+      }
+      const shouldAutoOpen = shouldAutoOpenLyricsOnResize(
+        windowsFeatureActive,
+        this.windowsCompactExpansionBusy,
+        this.suppressExpandedQueueAutoLyrics,
+        size
+      );
+      if (shouldAutoOpen && !this.showLyrics) {
         this.toggleLyrics();
         this.autoOpenedLyrics = true;
       } else if (!isMini && this.showLyrics && this.autoOpenedLyrics) {
@@ -369,6 +511,70 @@ export default defineComponent({
 #app {
   width: 100%;
   transition: all 0.4s;
+}
+
+#app.windows-compact-browse-prepared main,
+#app.windows-compact-browse-prepared nav,
+#app.windows-compact-browse-prepared .player,
+#app.windows-compact-browse-entering main,
+#app.windows-compact-browse-entering nav,
+#app.windows-compact-browse-entering .player {
+  will-change: transform, opacity;
+}
+
+#app.windows-compact-browse-prepared main,
+#app.windows-compact-browse-prepared nav,
+#app.windows-compact-browse-prepared .player {
+  opacity: 0;
+  transition: none !important;
+}
+
+#app.windows-compact-browse-prepared.windows-compact-browse-origin-top main,
+#app.windows-compact-browse-prepared.windows-compact-browse-origin-top nav,
+#app.windows-compact-browse-prepared.windows-compact-browse-origin-top .player {
+  transform: translate3d(0, -12px, 0) scale(0.97);
+  transform-origin: center top;
+}
+
+#app.windows-compact-browse-prepared.windows-compact-browse-origin-bottom main,
+#app.windows-compact-browse-prepared.windows-compact-browse-origin-bottom nav,
+#app.windows-compact-browse-prepared.windows-compact-browse-origin-bottom
+  .player {
+  transform: translate3d(0, 12px, 0) scale(0.97);
+  transform-origin: center bottom;
+}
+
+#app.windows-compact-browse-entering main,
+#app.windows-compact-browse-entering nav,
+#app.windows-compact-browse-entering .player {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+  transition: transform 420ms cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 420ms cubic-bezier(0.32, 0.72, 0, 1) !important;
+}
+
+#app.windows-compact-browse-entering nav {
+  transition-delay: 8ms !important;
+}
+
+#app.windows-compact-browse-entering .player {
+  transition-delay: 16ms !important;
+}
+
+#app.windows-compact-browse-reduced-motion.windows-compact-browse-prepared main,
+#app.windows-compact-browse-reduced-motion.windows-compact-browse-prepared nav,
+#app.windows-compact-browse-reduced-motion.windows-compact-browse-prepared
+  .player {
+  transform: none;
+}
+
+#app.windows-compact-browse-reduced-motion.windows-compact-browse-entering main,
+#app.windows-compact-browse-reduced-motion.windows-compact-browse-entering nav,
+#app.windows-compact-browse-reduced-motion.windows-compact-browse-entering
+  .player {
+  transform: none;
+  transition: opacity 120ms cubic-bezier(0.23, 1, 0.32, 1) !important;
+  transition-delay: 0ms !important;
 }
 
 // Pause visual effects while the hidden WebView keeps running.

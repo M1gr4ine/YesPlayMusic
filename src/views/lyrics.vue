@@ -3,8 +3,12 @@
     <div
       data-tauri-drag-region
       class="lyrics-page"
-      :class="{ 'no-lyric': noLyric }"
+      :class="{
+        'no-lyric': noLyric,
+        'compact-expansion-exit': compactExpansionExit,
+      }"
       :data-theme="theme"
+      :style="compactExpansionExitStyle"
     >
       <div
         v-if="
@@ -39,13 +43,13 @@
       <div
         v-if="isMini"
         class="mini-player"
+        :class="{ 'windows-no-text-selection': disableMiniTextSelection }"
         @mouseenter="setWindowButtons(true)"
         @mouseleave="handleMiniMouseLeave"
         @mousedown="handleMiniMouseDown"
         @dblclick="handleMiniDoubleClick"
       >
         <img class="mini-cover" :src="miniImageUrl" />
-        <!-- Keep blank space draggable while allowing text selection. -->
         <div class="mini-info">
           <div class="mini-title" :title="currentTrack.name">
             <span class="mini-copyable">{{ currentTrack.name }}</span>
@@ -435,6 +439,8 @@ import {
   startDesktopWindowDragging,
 } from '@/services/desktopTransport';
 import { isDesktopRuntime, isTauriRuntime } from '@/utils/runtime';
+import { isWindows } from '@/utils/platform';
+import { resolveMiniModeDuringCompactExpansion } from '@/services/compactExpansionTransition';
 import {
   calculateMiniSeekTime,
   getMiniProgressRiderStyle,
@@ -442,7 +448,6 @@ import {
 import {
   beginMiniWindowDragGesture,
   hasCrossedMiniWindowDragThreshold,
-  isBarWindowSize,
   shouldToggleMiniWindow,
 } from '@/utils/miniWindow';
 import { ARTWORK_SIZE, buildArtworkURL } from '@/utils/artwork';
@@ -492,6 +497,20 @@ function mergeLyrics(
 
 export default defineComponent({
   name: 'Lyrics',
+  props: {
+    compactExpansionExit: {
+      type: Boolean,
+      default: false,
+    },
+    compactExpansionOrigin: {
+      type: String,
+      default: 'top',
+    },
+    compactExpansionHeight: {
+      type: Number,
+      default: 0,
+    },
+  },
   emits: {
     'expand-compact-window': () => true,
   },
@@ -528,6 +547,29 @@ export default defineComponent({
     };
   },
   computed: {
+    compactExpansionExitStyle(): Record<string, string> | undefined {
+      if (
+        !this.compactExpansionExit ||
+        !Number.isFinite(this.compactExpansionHeight) ||
+        this.compactExpansionHeight <= 0
+      ) {
+        return undefined;
+      }
+      return this.compactExpansionOrigin === 'bottom'
+        ? {
+            top: 'auto',
+            bottom: '0px',
+            height: `${this.compactExpansionHeight}px`,
+          }
+        : {
+            top: '0px',
+            bottom: 'auto',
+            height: `${this.compactExpansionHeight}px`,
+          };
+    },
+    disableMiniTextSelection() {
+      return isWindows && isTauriRuntime;
+    },
     ...mapState(useAppStore, ['player', 'settings', 'showLyrics', 'data']),
     activeLyricIndex() {
       if (this.miniSeekDragging && typeof this.miniSeekPreview === 'number') {
@@ -637,6 +679,9 @@ export default defineComponent({
     },
   },
   watch: {
+    compactExpansionExit(active: boolean) {
+      if (!active) this.checkMini();
+    },
     currentTrack() {
       // Clear stale lyrics before updating the tray.
       this.highlightLyricIndex = -1;
@@ -712,12 +757,18 @@ export default defineComponent({
     },
     // Switch below the compact layout breakpoint (short windows only).
     checkMini() {
-      const next = isBarWindowSize({
+      const size = {
         width: window.innerWidth,
         height: window.innerHeight,
-      });
+      };
+      const next = resolveMiniModeDuringCompactExpansion(
+        this.isMini,
+        this.compactExpansionExit,
+        size
+      );
       // Two lyric lines need at least 64px of height.
       this.miniTall = window.innerHeight >= 64;
+      if (this.compactExpansionExit) return;
       if (next === this.isMini) return;
       this.isMini = next;
       this.pinDismissed = false;
@@ -756,7 +807,9 @@ export default defineComponent({
     handleMiniMouseDown(event: MouseEvent) {
       // Clear text selection before handing the gesture to Tauri.
       if (
-        !beginMiniWindowDragGesture(event, window.getSelection()) ||
+        !beginMiniWindowDragGesture(event, window.getSelection(), {
+          allowTextDrag: this.disableMiniTextSelection,
+        }) ||
         !isTauriRuntime
       ) {
         return;
@@ -786,7 +839,13 @@ export default defineComponent({
       document.removeEventListener('mouseup', this.cancelMiniWindowDrag);
     },
     handleMiniDoubleClick(event: MouseEvent) {
-      if (!shouldToggleMiniWindow(event)) return;
+      if (
+        !shouldToggleMiniWindow(event, {
+          allowTextDrag: this.disableMiniTextSelection,
+        })
+      ) {
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       this.$emit('expand-compact-window');
@@ -1131,6 +1190,12 @@ export default defineComponent({
     // Keep selectable text above the progress hit area.
     position: relative;
     z-index: 2;
+  }
+
+  &.windows-no-text-selection .mini-copyable {
+    -webkit-user-select: none;
+    user-select: none;
+    cursor: default;
   }
 
   // Shrink with the window height.
@@ -1748,6 +1813,32 @@ export default defineComponent({
 
 /* .fade-leave-active below version 2.1.8 */ {
   transform: translateY(100%);
+}
+
+.lyrics-page.compact-expansion-exit.slide-up-leave-active {
+  transition: opacity 180ms cubic-bezier(0.23, 1, 0.32, 1),
+    transform 180ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.lyrics-page.compact-expansion-exit.slide-up-leave-from {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.lyrics-page.compact-expansion-exit.slide-up-leave-to {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lyrics-page.compact-expansion-exit.slide-up-leave-active {
+    transition-duration: 0ms;
+  }
+
+  .lyrics-page.compact-expansion-exit.slide-up-leave-from,
+  .lyrics-page.compact-expansion-exit.slide-up-leave-to {
+    transform: none;
+  }
 }
 
 .slide-fade-enter-active {
