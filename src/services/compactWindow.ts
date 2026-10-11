@@ -1,5 +1,12 @@
 import { isTauriRuntime } from '@/utils/runtime';
 import { isBarWindowSize } from '@/utils/miniWindow';
+import {
+  canPersistCompactWindowFrame,
+  getTaskbarDockState,
+  isTaskbarDockingAvailable,
+  syncTaskbarCompactMode,
+} from '@/services/windowsTaskbar';
+import type { TaskbarDockState } from '@/services/windowsTaskbar';
 
 export const COMPACT_EXPANDED_SIZE = Object.freeze({ width: 920, height: 620 });
 export const COMPACT_RESIZE_SETTLE_MS = 250;
@@ -14,6 +21,11 @@ export interface CompactWindowFrame {
   y: number | null;
   width: number;
   height: number;
+}
+
+export interface CompactWindowSnapshot {
+  frame: CompactWindowFrame | null;
+  normal: boolean;
 }
 
 interface CompactWindowFrameInput {
@@ -228,11 +240,21 @@ export async function signalInitialWindowReady(): Promise<boolean> {
 }
 
 export async function rememberCurrentCompactWindowFrame() {
+  if (!canPersistCompactWindowFrame(getTaskbarDockState())) return null;
   const snapshot = await captureCurrentCompactWindowSnapshot();
+  return rememberCompactWindowSnapshot(snapshot, getTaskbarDockState());
+}
+
+export function rememberCompactWindowSnapshot(
+  snapshot: CompactWindowSnapshot | null,
+  taskbarState: TaskbarDockState = getTaskbarDockState(),
+  storage: CompactWindowStorage | null = browserStorage()
+) {
   const frame = snapshot?.frame;
   // Maximized and fullscreen frames are not reusable browse sizes.
   if (!frame || !snapshot.normal) return null;
-  rememberCompactWindowFrame(frame);
+  if (!canPersistCompactWindowFrame(taskbarState)) return null;
+  rememberCompactWindowFrame(frame, storage);
   return {
     mode: isBarWindowSize(frame) ? 'bar' : 'browse',
     frame,
@@ -241,23 +263,44 @@ export async function rememberCurrentCompactWindowFrame() {
 
 export async function expandCompactWindow() {
   if (compactWindowTransitioning) return false;
-  const snapshot = await captureCurrentCompactWindowSnapshot();
-  const current = snapshot?.frame;
-  // Ignore transient maximized dimensions from the window manager.
-  if (!current || (snapshot.normal && !isBarWindowSize(current))) return false;
-
-  const memory = snapshot.normal
-    ? rememberCompactWindowFrame(current)
-    : loadCompactWindowMemory();
-  const rememberedTarget =
-    memory.browse ||
-    normalizeCompactWindowFrame({ ...COMPACT_EXPANDED_SIZE, x: null, y: null });
-  if (!rememberedTarget) return false;
-  // Keep the current display position when restoring a remembered size.
-  const target = buildCompactWindowTransitionFrame(current, rememberedTarget);
-  if (!target) return false;
   compactWindowTransitioning = true;
   try {
+    if (isTaskbarDockingAvailable()) {
+      try {
+        // Native detachment restores the floating frame before we capture the
+        // current position or choose the expanded target size.
+        const dockState = await syncTaskbarCompactMode(false);
+        if (
+          dockState.enabled &&
+          (dockState.mode === 'docked' || dockState.mode === 'waiting')
+        ) {
+          return false;
+        }
+      } catch (error) {
+        console.warn('[taskbar-dock] could not detach before expanding', error);
+        return false;
+      }
+    }
+    const snapshot = await captureCurrentCompactWindowSnapshot();
+    const current = snapshot?.frame;
+    // Ignore transient maximized dimensions from the window manager.
+    if (!current || (snapshot.normal && !isBarWindowSize(current)))
+      return false;
+
+    const memory = snapshot.normal
+      ? rememberCompactWindowFrame(current)
+      : loadCompactWindowMemory();
+    const rememberedTarget =
+      memory.browse ||
+      normalizeCompactWindowFrame({
+        ...COMPACT_EXPANDED_SIZE,
+        x: null,
+        y: null,
+      });
+    if (!rememberedTarget) return false;
+    // Keep the current display position when restoring a remembered size.
+    const target = buildCompactWindowTransitionFrame(current, rememberedTarget);
+    if (!target) return false;
     const expanded = await applyCompactWindowFrame(target);
     if (expanded) rememberCompactWindowFrame(target);
     return expanded;

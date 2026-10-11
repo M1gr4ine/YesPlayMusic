@@ -1,5 +1,8 @@
 export default {
   common: {
+    closeWindow: 'Close window',
+    loadingLyrics: 'Loading lyrics',
+    floatMiniPlayer: 'Return mini player to floating mode',
     play: 'PLAY',
     songs: 'Songs',
   },

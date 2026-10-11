@@ -1,5 +1,8 @@
 export default {
   common: {
+    closeWindow: 'ウィンドウを閉じる',
+    loadingLyrics: '歌詞を読み込み中',
+    floatMiniPlayer: 'フローティング表示に戻す',
     play: '再生',
     songs: '曲',
   },

@@ -1,5 +1,8 @@
 export default {
   common: {
+    closeWindow: '關閉視窗',
+    loadingLyrics: '正在載入歌詞',
+    floatMiniPlayer: '恢復為浮動播放器',
     play: '播放',
     songs: '首歌',
   },

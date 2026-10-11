@@ -48,6 +48,7 @@ devenv.local.nix
 /src-tauri/generated
 /src-tauri/target
 /src-tauri/gen/schemas
+/src-tauri/resources/windows-taskbar-native.exe
 
 # Local architecture plans
 /docs/sidecar-rust-migration.local.md
