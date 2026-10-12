@@ -1,6 +1,8 @@
 //! UNM (UnblockNeteaseMusic) resolution, framework-free.
 //! The Sidecar wraps this in an axum route; the TUI calls it directly.
 
+mod qq;
+
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
@@ -214,8 +216,11 @@ impl Default for UnmState {
 
 impl UnmState {
     pub fn new() -> Self {
+        let mut executor = build_full_executor();
+        // The bundled QQ engine cannot obtain QQ audio; see `qq`.
+        executor.register(Cow::Borrowed(qq::ENGINE_ID), Arc::new(qq::QqEngine::new()));
         Self {
-            executor: Arc::new(build_full_executor()),
+            executor: Arc::new(executor),
             bilibili_client: Arc::new(ReqwestBilibiliClient {
                 client: reqwest::Client::builder()
                     .connect_timeout(Duration::from_secs(10))

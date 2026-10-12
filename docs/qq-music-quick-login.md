@@ -11,3 +11,9 @@ The manual cookie field remains available on other platforms. This feature does 
 ## Verification
 
 Cookie normalization, domain/name filtering, candidate stability, cancellation and conflicting settings changes are covered by automated tests. Native Windows verification checks the dedicated WebView2 session, official-page navigation restrictions, denied permissions, HttpOnly-cookie capture and acknowledged persistence. Tests use fake cookie values; a real QQ account login requires completing QQ Music's official interactive authentication.
+
+## QQ playback compatibility
+
+The QQ provider sends `guid` as a string and requests the matched media file's `media_mid`, rather than treating the catalog song ID as a file ID. An empty `purl` is rejected before forming an audio URL. It uses the existing imported QQ session and source settings, so authorization does not need to be repeated after installing the updated backend.
+
+Provider tests cover request shape, media identifiers, duration matching, response validation and empty playback results. In the combined Windows build, an already authorized QQ source resolved Jay Chou's Qing Tian and Qi Li Xiang, and both audio range requests returned HTTP 206 with 1024 bytes. Session values and signed playback URLs were neither saved nor logged. Automatic session renewal is not implemented.
