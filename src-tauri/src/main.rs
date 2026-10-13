@@ -13,6 +13,7 @@ mod macos_media_controls;
 #[cfg(target_os = "windows")]
 mod taskbar_docking;
 #[cfg(any(target_os = "windows", test))]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 mod taskbar_docking_model;
 mod window_preferences;
 
@@ -981,11 +982,18 @@ fn update_desktop_preferences(app: &AppHandle, payload: &serde_json::Value) -> R
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn taskbar_dock(
+    app: &AppHandle,
+) -> Option<tauri::State<'_, taskbar_docking::TaskbarDockController>> {
+    app.try_state()
+}
+
 fn hide_main_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
         #[cfg(target_os = "windows")]
-        if let Some(controller) = app.try_state::<taskbar_docking::TaskbarDockController>() {
-            controller.request_hide();
+        if let Some(dock) = taskbar_dock(app) {
+            dock.request_hide();
         }
         window.hide().map_err(|error| error.to_string())?;
         render_tray_title(app)?;
@@ -1015,17 +1023,10 @@ fn hide_main_window_or_exit(app: &AppHandle) -> Result<(), String> {
 
 fn show_main_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
+        // A docked player stays hidden; the poller reveals its taskbar strip.
         #[cfg(target_os = "windows")]
-        if let Some(controller) = app.try_state::<taskbar_docking::TaskbarDockController>() {
-            let controller = (*controller).clone();
-            if !controller.request_show(&window)? {
-                render_tray_title(app)?;
-                return Ok(());
-            }
-            if controller.is_compact_docking_active() {
-                render_tray_title(app)?;
-                return Ok(());
-            }
+        if taskbar_dock(app).is_some_and(|dock| !dock.request_show()) {
+            return render_tray_title(app);
         }
         if window.is_minimized().map_err(|error| error.to_string())? {
             window.unminimize().map_err(|error| error.to_string())?;
@@ -1251,24 +1252,17 @@ fn handle_app_menu_event(app: &AppHandle, id: &str) {
         AppMenuAction::ToggleFullscreen => {
             if let Some(window) = app.get_webview_window("main") {
                 if let Ok(fullscreen) = window.is_fullscreen() {
+                    // Undock before the player leaves compact mode.
                     #[cfg(target_os = "windows")]
-                    if let Some(controller) =
-                        app.try_state::<taskbar_docking::TaskbarDockController>()
-                    {
-                        if controller.is_compact_docking_active() {
-                            let controller = (*controller).clone();
-                            let window = window.clone();
-                            std::thread::spawn(move || {
-                                if let Err(error) = controller.set_compact(&window, false) {
-                                    eprintln!(
-                                        "[taskbar-docking] could not detach before fullscreen: {error}"
-                                    );
-                                    return;
-                                }
+                    if let Some(dock) = taskbar_dock(app).filter(|dock| dock.is_docking_active()) {
+                        let dock = (*dock).clone();
+                        thread::spawn(move || match dock.set_compact(false) {
+                            Ok(()) => {
                                 let _ = window.set_fullscreen(!fullscreen);
-                            });
-                            return;
-                        }
+                            }
+                            Err(error) => eprintln!("[taskbar-docking] could not undock: {error}"),
+                        });
+                        return;
                     }
                     let _ = window.set_fullscreen(!fullscreen);
                 }
@@ -1607,9 +1601,8 @@ fn desktop_event(
         "minimize" => {
             if let Some(window) = app.get_webview_window("main") {
                 #[cfg(target_os = "windows")]
-                if let Some(controller) = app.try_state::<taskbar_docking::TaskbarDockController>()
-                {
-                    controller.request_hide();
+                if let Some(dock) = taskbar_dock(&app) {
+                    dock.request_hide();
                 }
                 window.minimize().map_err(|error| error.to_string())?;
             }
@@ -1725,15 +1718,6 @@ fn load_initial_window_preferences(app: &AppHandle) -> WindowPreferences {
 }
 
 fn persist_window_position(app: &AppHandle, position: WindowPosition) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    if let (Some(controller), Some(window)) = (
-        app.try_state::<taskbar_docking::TaskbarDockController>(),
-        app.get_webview_window("main"),
-    ) {
-        if !controller.should_persist_main_frame(&window) {
-            return Ok(());
-        }
-    }
     let state = app.state::<WindowPreferencesState>();
     let mut preferences = state
         .preferences
@@ -1755,12 +1739,6 @@ fn persist_current_window_position(app: &AppHandle) -> Result<(), String> {
     let Some(window) = app.get_webview_window("main") else {
         return Ok(());
     };
-    #[cfg(target_os = "windows")]
-    if let Some(controller) = app.try_state::<taskbar_docking::TaskbarDockController>() {
-        if !controller.should_persist_main_frame(&window) {
-            return Ok(());
-        }
-    }
     if window.is_minimized().map_err(|error| error.to_string())?
         || window.is_maximized().map_err(|error| error.to_string())?
         || window.is_fullscreen().map_err(|error| error.to_string())?
@@ -1778,14 +1756,6 @@ fn persist_current_window_position(app: &AppHandle) -> Result<(), String> {
 }
 
 fn schedule_window_position_save(app: &AppHandle, position: WindowPosition) {
-    #[cfg(target_os = "windows")]
-    if let Some(window) = app.get_webview_window("main") {
-        if let Some(controller) = app.try_state::<taskbar_docking::TaskbarDockController>() {
-            if !controller.should_persist_main_frame(&window) {
-                return;
-            }
-        }
-    }
     let state = app.state::<WindowPreferencesState>();
     let mut movement = match state.movement.lock() {
         Ok(movement) => movement,
@@ -1893,7 +1863,6 @@ fn renderer_ready(window: WebviewWindow) -> Result<bool, String> {
     if window.label() != "main" {
         return Err("renderer_ready is restricted to the main window".to_string());
     }
-    println!("[tauri] renderer-ready: main");
     show_pending_startup_window(window.app_handle())
 }
 
@@ -1905,9 +1874,6 @@ async fn restore_compact_window(
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    if window.label() != "main" {
-        return Err("restore_compact_window is restricted to the main window".to_string());
-    }
     if !width.is_finite()
         || !height.is_finite()
         || !(300.0..=8192.0).contains(&width)
@@ -1916,17 +1882,11 @@ async fn restore_compact_window(
         return Err("窗口尺寸超出安全范围".to_string());
     }
     #[cfg(target_os = "windows")]
-    if let Some(controller) = window
-        .app_handle()
-        .try_state::<taskbar_docking::TaskbarDockController>()
-    {
-        let controller = (*controller).clone();
-        let window_for_docking = window.clone();
-        tauri::async_runtime::spawn_blocking(move || {
-            controller.set_compact(&window_for_docking, false)
-        })
-        .await
-        .map_err(|error| error.to_string())??;
+    if let Some(dock) = taskbar_dock(window.app_handle()) {
+        let dock = (*dock).clone();
+        tauri::async_runtime::spawn_blocking(move || dock.set_compact(false))
+            .await
+            .map_err(|error| error.to_string())??;
     }
     if window.is_fullscreen().map_err(|error| error.to_string())? {
         window
@@ -1936,12 +1896,12 @@ async fn restore_compact_window(
     if window.is_maximized().map_err(|error| error.to_string())? {
         window.unmaximize().map_err(|error| error.to_string())?;
     }
+    #[cfg(target_os = "windows")]
+    taskbar_docking::set_player_client_size(&window, width, height)?;
     #[cfg(not(target_os = "windows"))]
     window
         .set_size(tauri::LogicalSize::new(width, height))
         .map_err(|error| error.to_string())?;
-    #[cfg(target_os = "windows")]
-    taskbar_docking::correct_client_size_after_restore(&window, width, height)?;
     let restored_size = window.outer_size().map_err(|error| error.to_string())?;
     let monitors = monitor_work_areas(&window)?;
     let reachable = x.zip(y).map(|(x, y)| {
@@ -2633,18 +2593,17 @@ fn create_main_window(
             }
         })
         .build()?;
-    #[cfg(target_os = "windows")]
-    let overlay = create_taskbar_overlay(app.handle(), proxy_relay_enabled)?;
     if let Some(position) = preferences.position {
         window.set_position(PhysicalPosition::new(position.x, position.y))?;
     }
     ensure_main_window_reachable(&window)?;
     persist_current_window_position(app.handle())?;
     apply_always_on_top(&window, preferences.always_on_top)?;
-
     #[cfg(target_os = "windows")]
     app.state::<taskbar_docking::TaskbarDockController>()
-        .bind_and_start(window.clone(), overlay);
+        .start(&window, move |app| {
+            build_taskbar_overlay(app, port, proxy_relay_enabled)
+        })?;
 
     let window_for_events = window.clone();
     window.on_window_event(move |event| {
@@ -2652,14 +2611,12 @@ fn create_main_window(
         match event {
             WindowEvent::Resized(_) => {
                 #[cfg(target_os = "windows")]
-                if let Some(controller) = app.try_state::<taskbar_docking::TaskbarDockController>()
-                {
+                if let Some(dock) = taskbar_dock(app) {
                     if window_for_events.is_minimized().unwrap_or(false) {
-                        controller.request_hide();
+                        dock.request_hide();
                     } else {
-                        // Shrinking into the compact bar near the taskbar
-                        // offers the same release-to-dock as dragging it there.
-                        controller.note_window_move(&window_for_events);
+                        // Shrinking into the bar near the taskbar also docks on release.
+                        dock.note_player_moved();
                     }
                 }
                 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -2667,26 +2624,20 @@ fn create_main_window(
             }
             #[cfg(target_os = "windows")]
             WindowEvent::Focused(true) => {
-                if window_for_events.is_visible().unwrap_or(false)
-                    && !window_for_events.is_minimized().unwrap_or(true)
-                {
-                    if let Some(controller) =
-                        app.try_state::<taskbar_docking::TaskbarDockController>()
+                // Restoring the player from Windows' own UI counts as a show
+                // request; hiding a docked player also moves focus around.
+                if let Some(dock) = taskbar_dock(app).filter(|dock| !dock.is_docking_active()) {
+                    if window_for_events.is_visible().unwrap_or(false)
+                        && !window_for_events.is_minimized().unwrap_or(true)
                     {
-                        // Reparenting and hiding a docked child can emit focus
-                        // events before Tao finishes applying visibility. Only
-                        // explicit reopen requests may override its hide intent.
-                        if !controller.is_compact_docking_active() {
-                            let _ = controller.request_show(&window_for_events);
-                        }
+                        dock.request_show();
                     }
                 }
             }
             WindowEvent::Moved(position) => {
                 #[cfg(target_os = "windows")]
-                if let Some(controller) = app.try_state::<taskbar_docking::TaskbarDockController>()
-                {
-                    controller.note_window_move(&window_for_events);
+                if let Some(dock) = taskbar_dock(app) {
+                    dock.note_player_moved();
                 }
                 let normal = !window_for_events.is_minimized().unwrap_or(true)
                     && !window_for_events.is_maximized().unwrap_or(true)
@@ -2709,26 +2660,14 @@ fn create_main_window(
                     .map(|preferences| preferences.close_app_option)
                     .unwrap_or(CloseAppOption::MinimizeToTray);
                 match close_decision(cfg!(target_os = "macos"), option) {
-                    CloseDecision::Exit => {
-                        #[cfg(target_os = "windows")]
-                        api.prevent_close();
-                        app.exit(0);
-                    }
+                    CloseDecision::Exit => app.exit(0),
                     CloseDecision::Hide | CloseDecision::MinimizeToTray => {
                         if can_hide_main_window(app) {
                             api.prevent_close();
-                            #[cfg(target_os = "windows")]
-                            if let Some(controller) =
-                                app.try_state::<taskbar_docking::TaskbarDockController>()
-                            {
-                                controller.request_hide();
-                            }
                             if let Err(error) = hide_main_window(app) {
                                 eprintln!("[tauri] failed to hide the main window: {error}");
                             }
                         } else {
-                            #[cfg(target_os = "windows")]
-                            api.prevent_close();
                             app.exit(0);
                         }
                     }
@@ -2765,88 +2704,70 @@ fn create_main_window(
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
-fn create_taskbar_overlay(
-    app: &AppHandle,
-    proxy_relay_enabled: bool,
-) -> Result<WebviewWindow, Box<dyn std::error::Error>> {
-    let port = if cfg!(debug_assertions) {
-        DEV_WEB_PORT
-    } else {
-        RELEASE_WEB_PORT
+macro_rules! commands {
+    ($($platform:path),* $(,)?) => {
+        tauri::generate_handler![
+            desktop_event,
+            is_always_on_top,
+            toggle_always_on_top,
+            renderer_ready,
+            restore_compact_window,
+            read_legacy_settings,
+            legacy_renderer_data::import_legacy_renderer_data,
+            updater_configured,
+            prepare_for_update,
+            $($platform),*
+        ]
     };
-    let url = format!("http://127.0.0.1:{port}/#/taskbar-overlay").parse()?;
-    let mut builder = WebviewWindowBuilder::new(app, "taskbar-lyrics", WebviewUrl::External(url))
-        .title("YesPlayMusic lyrics")
-        .inner_size(1.0, 1.0)
-        .decorations(false)
-        .transparent(true)
-        .shadow(false)
-        .resizable(false)
-        .maximizable(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .focusable(false)
-        .visible(false);
+}
+
+fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
+    #[cfg(target_os = "windows")]
+    return commands![
+        taskbar_docking::sync_taskbar_compact_mode,
+        taskbar_docking::publish_taskbar_overlay_snapshot,
+        taskbar_docking::taskbar_overlay_ready,
+        taskbar_docking::taskbar_overlay_visual_ready,
+        taskbar_docking::taskbar_overlay_action,
+    ];
+    #[cfg(not(target_os = "windows"))]
+    return commands![];
+}
+
+/// The taskbar strip: a borderless, transparent page the docking controller
+/// parents into Explorer's taskbar.
+#[cfg(target_os = "windows")]
+fn build_taskbar_overlay(
+    app: &AppHandle,
+    port: u16,
+    proxy_relay_enabled: bool,
+) -> tauri::Result<WebviewWindow> {
+    let url = format!("http://127.0.0.1:{port}/taskbar-overlay.html")
+        .parse()
+        .expect("static overlay URL");
+    let mut builder = WebviewWindowBuilder::new(
+        app,
+        taskbar_docking::OVERLAY_LABEL,
+        WebviewUrl::External(url),
+    )
+    .title("YesPlayMusic lyrics")
+    .inner_size(1.0, 1.0)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .resizable(false)
+    .maximizable(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focusable(false)
+    .visible(false);
     if proxy_relay_enabled {
-        let proxy = format!("http://127.0.0.1:{WEBVIEW_PROXY_RELAY_PORT}").parse()?;
+        let proxy = format!("http://127.0.0.1:{WEBVIEW_PROXY_RELAY_PORT}")
+            .parse()
+            .expect("static proxy URL");
         builder = builder.proxy_url(proxy);
     }
-    let app_handle = app.clone();
-    let overlay = builder.build()?;
-    overlay.on_window_event(move |event| match event {
-        WindowEvent::CloseRequested { api, .. } => {
-            api.prevent_close();
-            if let Some(controller) =
-                app_handle.try_state::<taskbar_docking::TaskbarDockController>()
-            {
-                controller.request_hide();
-            }
-        }
-        WindowEvent::Destroyed => {
-            let should_recreate = app_handle
-                .try_state::<taskbar_docking::TaskbarDockController>()
-                .is_some_and(|controller| controller.overlay_destroyed());
-            if !should_recreate {
-                return;
-            }
-            let app_handle = app_handle.clone();
-            thread::spawn(move || {
-                let mut retry_delay_ms = 100_u64;
-                loop {
-                    thread::sleep(Duration::from_millis(retry_delay_ms));
-                    let Some(controller) = app_handle
-                        .try_state::<taskbar_docking::TaskbarDockController>()
-                    else {
-                        break;
-                    };
-                    if app_handle.get_webview_window("main").is_none()
-                        || controller.is_stopping()
-                    {
-                        break;
-                    }
-                    if app_handle.get_webview_window("taskbar-lyrics").is_some() {
-                        break;
-                    }
-                    if !controller.overlay_reset_complete() {
-                        retry_delay_ms = (retry_delay_ms * 2).min(2_000);
-                        continue;
-                    }
-                    match create_taskbar_overlay(&app_handle, proxy_relay_enabled) {
-                        Ok(_) => break,
-                        Err(error) => {
-                            eprintln!(
-                                "[taskbar-docking] could not recreate overlay window; retrying: {error}"
-                            );
-                            retry_delay_ms = (retry_delay_ms * 2).min(2_000);
-                        }
-                    }
-                }
-            });
-        }
-        _ => {}
-    });
-    Ok(overlay)
+    builder.build()
 }
 
 fn main() {
@@ -2856,23 +2777,6 @@ fn main() {
     }
 
     let context = tauri::generate_context!();
-    #[cfg(target_os = "windows")]
-    let window_state_plugin = tauri_plugin_window_state::Builder::default()
-        .with_state_flags(
-            tauri_plugin_window_state::StateFlags::MAXIMIZED
-                | tauri_plugin_window_state::StateFlags::VISIBLE
-                | tauri_plugin_window_state::StateFlags::DECORATIONS
-                | tauri_plugin_window_state::StateFlags::FULLSCREEN,
-        )
-        .skip_initial_state("main")
-        // The taskbar overlay's visibility and style belong to the docking
-        // controller; a restored tao state would restyle a taskbar child.
-        .with_denylist(&["taskbar-lyrics"])
-        .build();
-    #[cfg(not(target_os = "windows"))]
-    let window_state_plugin = tauri_plugin_window_state::Builder::default()
-        .skip_initial_state("main")
-        .build();
     #[cfg(target_os = "macos")]
     let single_instance_socket = single_instance_socket_path(&context.config().identifier);
     #[cfg(target_os = "macos")]
@@ -2882,7 +2786,7 @@ fn main() {
     )
     .expect("failed to serialize macOS cold startup");
 
-    let app_builder = tauri::Builder::default()
+    let app = tauri::Builder::default()
         .menu(create_app_menu)
         .on_menu_event(|app, event| handle_app_menu_event(app, event.id().as_ref()))
         // Register single-instance handling before a second process can bind sidecar ports.
@@ -2910,13 +2814,7 @@ fn main() {
                         Some("minimize") => {
                             if let Some(window) = app.get_webview_window("main") {
                                 if window.is_visible().unwrap_or(false) {
-                                    #[cfg(target_os = "windows")]
-                                    if let Some(controller) =
-                                        app.try_state::<taskbar_docking::TaskbarDockController>()
-                                    {
-                                        controller.request_hide();
-                                    }
-                                    let _ = window.hide();
+                                    let _ = hide_main_window(app);
                                 } else {
                                     let _ = show_main_window(app);
                                 }
@@ -2936,18 +2834,25 @@ fn main() {
         .plugin(updater.build())
         // Skip ambiguous physical-pixel restore across mixed-DPI displays.
         // The renderer restores logical size while the plugin still persists on exit.
-        .plugin(window_state_plugin)
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .skip_initial_state("main")
+                // The docking controller owns the taskbar strip's visibility
+                // and style; a restored Tao state would restyle a taskbar child.
+                .with_denylist(&["taskbar-lyrics"])
+                .build(),
+        )
         .setup(|app| {
             let window_preferences = load_initial_window_preferences(app.handle());
             app.manage(WindowPreferencesState {
                 preferences: Mutex::new(window_preferences),
                 movement: Mutex::new(PendingWindowMovement::default()),
             });
+            app.manage(StartupWindowState(AtomicBool::new(false)));
             #[cfg(target_os = "windows")]
             app.manage(taskbar_docking::TaskbarDockController::new(
                 app.handle().clone(),
             ));
-            app.manage(StartupWindowState(AtomicBool::new(false)));
             #[cfg(target_os = "macos")]
             spawn_control_socket(app.handle().clone());
             app.manage(GlobalShortcutRegistrationState(Mutex::new(
@@ -3104,41 +3009,8 @@ fn main() {
                 macos_media_controls::install(app.handle()).map_err(std::io::Error::other)?;
             }
             Ok(())
-        });
-
-    #[cfg(target_os = "windows")]
-    let app_builder = app_builder.invoke_handler(tauri::generate_handler![
-        desktop_event,
-        is_always_on_top,
-        toggle_always_on_top,
-        renderer_ready,
-        restore_compact_window,
-        read_legacy_settings,
-        legacy_renderer_data::import_legacy_renderer_data,
-        updater_configured,
-        prepare_for_update,
-        taskbar_docking::set_taskbar_docking,
-        taskbar_docking::sync_taskbar_compact_mode,
-        taskbar_docking::publish_taskbar_overlay_snapshot,
-        taskbar_docking::taskbar_overlay_ready,
-        taskbar_docking::taskbar_overlay_visual_ready,
-        taskbar_docking::taskbar_overlay_action
-    ]);
-
-    #[cfg(not(target_os = "windows"))]
-    let app_builder = app_builder.invoke_handler(tauri::generate_handler![
-        desktop_event,
-        is_always_on_top,
-        toggle_always_on_top,
-        renderer_ready,
-        restore_compact_window,
-        read_legacy_settings,
-        legacy_renderer_data::import_legacy_renderer_data,
-        updater_configured,
-        prepare_for_update
-    ]);
-
-    let app = app_builder
+        })
+        .invoke_handler(invoke_handler())
         .build(context)
         .expect("failed to build Tauri application");
 
@@ -3150,19 +3022,17 @@ fn main() {
     }
 
     app.run(|app, event| match event {
+        // Stop rebuilding the taskbar strip while windows are torn down.
         #[cfg(target_os = "windows")]
-        RunEvent::ExitRequested { api, code, .. } => {
-            if let Some(controller) = app.try_state::<taskbar_docking::TaskbarDockController>() {
-                if controller.defer_exit(code.unwrap_or(0)) {
-                    api.prevent_exit();
-                }
+        RunEvent::ExitRequested { .. } => {
+            if let Some(dock) = taskbar_dock(app) {
+                dock.shutdown();
             }
         }
         RunEvent::Exit => {
             #[cfg(target_os = "windows")]
-            if let Some(controller) = app.try_state::<taskbar_docking::TaskbarDockController>() {
-                let window = app.get_webview_window("main");
-                controller.shutdown(window.as_ref());
+            if let Some(dock) = taskbar_dock(app) {
+                dock.shutdown();
             }
             if let Err(error) = persist_current_window_position(app) {
                 eprintln!("[tauri] failed to flush the window position: {error}");

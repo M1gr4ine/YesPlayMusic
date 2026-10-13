@@ -44,6 +44,7 @@ async function prepareFixture(
   const sidecarName = rustSidecarBuildPlan({ targetTriple }).outputName;
   const files = [
     path.join(root, 'dist-tauri', 'index.html'),
+    path.join(root, 'dist-tauri', 'taskbar-overlay.html'),
     path.join(root, 'src-tauri/generated/app-compliance/SHA256SUMS'),
     path.join(
       root,

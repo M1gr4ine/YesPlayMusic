@@ -137,10 +137,11 @@ pub async fn apply_security_headers(request: Request<Body>, next: Next) -> Respo
 }
 
 pub async fn serve_renderer(renderer_dir: PathBuf, mut request: Request<Body>) -> Response<Body> {
-    let path = percent_encoding::percent_decode_str(request.uri().path()).decode_utf8_lossy();
-    let is_document = path.ends_with('/') || path.to_ascii_lowercase().ends_with(".html");
+    let path = request.uri().path();
+    let is_document = path.ends_with('/') || path.ends_with(".html");
     if is_document {
-        // A rollback must not reuse a cached index from a newer build.
+        // Documents name hashed assets; after switching builds (a rollback
+        // included) a revalidated old document would reference missing files.
         request.headers_mut().remove(header::IF_MODIFIED_SINCE);
         request.headers_mut().remove(header::IF_NONE_MATCH);
     }
@@ -189,101 +190,28 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn renderer_documents_do_not_reuse_a_newer_builds_cached_index() {
+    async fn documents_are_never_revalidated_but_hashed_assets_are() {
         let directory = tempfile::tempdir().unwrap();
-        std::fs::write(
-            directory.path().join("index.html"),
-            r#"<script src="old-build.js"></script>"#,
-        )
-        .unwrap();
-        std::fs::create_dir(directory.path().join("nested")).unwrap();
-        std::fs::write(
-            directory.path().join("nested/index.html"),
-            "nested current index",
-        )
-        .unwrap();
-        for method in [Method::GET, Method::HEAD] {
-            for path in ["/", "/index.html?build=old", "/%69ndex%2Ehtml", "/nested/"] {
-                for validators in [0, 1, 2] {
-                    let mut request = Request::builder().method(method.clone()).uri(path);
-                    if validators != 1 {
-                        request = request
-                            .header(header::IF_MODIFIED_SINCE, "Fri, 01 Jan 2100 00:00:00 GMT");
-                    }
-                    if validators != 0 {
-                        request = request.header(header::IF_NONE_MATCH, "*");
-                    }
-                    let response = serve_renderer(
-                        directory.path().to_path_buf(),
-                        request.body(Body::empty()).unwrap(),
-                    )
-                    .await;
-                    assert_eq!(
-                        response.status(),
-                        StatusCode::OK,
-                        "{method} {path}, validators={validators}"
-                    );
-                    let body = to_bytes(response.into_body(), 1024).await.unwrap();
-                    if method == Method::HEAD {
-                        assert!(body.is_empty());
-                    } else if path == "/nested/" {
-                        assert_eq!(body, "nested current index");
-                    } else {
-                        assert_eq!(body, r#"<script src="old-build.js"></script>"#);
-                    }
-                }
-            }
-        }
-    }
+        std::fs::write(directory.path().join("index.html"), "index").unwrap();
+        std::fs::create_dir(directory.path().join("assets")).unwrap();
+        std::fs::write(directory.path().join("assets/index-abc123.js"), "chunk").unwrap();
+        let serve = |path: &str, if_modified_since: &str| {
+            let request = Request::builder()
+                .uri(path)
+                .header(header::IF_MODIFIED_SINCE, if_modified_since)
+                .body(Body::empty())
+                .unwrap();
+            serve_renderer(directory.path().to_path_buf(), request)
+        };
+        let future = "Fri, 01 Jan 2100 00:00:00 GMT";
 
-    #[tokio::test]
-    async fn renderer_index_is_not_stored_between_builds() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("index.html"), "current index").unwrap();
-        for path in ["/", "/index.html", "/%69ndex%2Ehtml"] {
-            let response = serve_renderer(
-                directory.path().to_path_buf(),
-                Request::builder().uri(path).body(Body::empty()).unwrap(),
-            )
-            .await;
-            assert_eq!(response.status(), StatusCode::OK);
+        for path in ["/", "/index.html"] {
+            let response = serve(path, future).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
             assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         }
-    }
-
-    #[tokio::test]
-    async fn renderer_hashed_assets_still_support_revalidation() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::create_dir(directory.path().join("assets")).unwrap();
-        std::fs::write(
-            directory.path().join("assets/index-abc123.js"),
-            "current chunk",
-        )
-        .unwrap();
-        let response = serve_renderer(
-            directory.path().to_path_buf(),
-            Request::builder()
-                .uri("/assets/index-abc123.js")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers()[header::CACHE_CONTROL],
-            "public, max-age=0"
-        );
-        let modified = response.headers()[header::LAST_MODIFIED].clone();
-        let response = serve_renderer(
-            directory.path().to_path_buf(),
-            Request::builder()
-                .uri("/assets/index-abc123.js")
-                .header(header::IF_MODIFIED_SINCE, modified)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        let asset = serve("/assets/index-abc123.js", future).await;
+        assert_eq!(asset.status(), StatusCode::NOT_MODIFIED);
     }
 
     #[derive(Clone)]

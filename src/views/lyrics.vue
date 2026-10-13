@@ -128,7 +128,7 @@
             :style="miniProgressRiderStyle"
           ></span>
         </div>
-        <div v-if="taskbarDockingAvailable" class="mini-dock-glow"></div>
+        <div v-if="taskbarDock" class="mini-dock-glow"></div>
         <div
           v-if="taskbarDockHint !== 'none'"
           class="mini-dock-hint"
@@ -136,9 +136,11 @@
           role="status"
         >
           {{
-            taskbarDockHint === 'ready'
-              ? $t('common.releaseToDock')
-              : $t('common.dockSpaceUnavailable')
+            $t(
+              taskbarDockHint === 'ready'
+                ? 'common.releaseToDock'
+                : 'common.dockSpaceUnavailable'
+            )
           }}
         </div>
       </div>
@@ -410,7 +412,7 @@
 </template>
 
 <script lang="ts">
-import { defineComponent } from 'vue';
+import { defineComponent, markRaw } from 'vue';
 // The lyrics page of Apple Music is so gorgeous, so I copy the design.
 // Some of the codes are from https://github.com/sl1673495/vue-netease-music
 
@@ -448,25 +450,18 @@ import {
   sendDesktop,
   startDesktopWindowDragging,
 } from '@/services/desktopTransport';
+import { isDesktopRuntime, isTauriRuntime } from '@/utils/runtime';
 import {
-  canOpenMainPlayerFromCompactDoubleClick,
-  clampTaskbarOverlaySeek,
-  DEFAULT_TASKBAR_DOCK_STATE,
+  connectTaskbarDock,
   isTaskbarDockingAvailable,
-  listenTaskbarDockHint,
-  listenTaskbarOverlayActions,
-  listenTaskbarDockState,
-  publishTaskbarOverlaySnapshot,
-  syncTaskbarCompactMode,
-  syncTaskbarCompactModeWithReadiness,
 } from '@/services/windowsTaskbar';
 import type {
   TaskbarDockHint,
-  TaskbarDockState,
-  TaskbarOverlayAction,
+  TaskbarDockSession,
   TaskbarOverlaySnapshot,
+  TaskbarPlaybackAction,
 } from '@/services/windowsTaskbar';
-import { isDesktopRuntime, isTauriRuntime } from '@/utils/runtime';
+import { normalizePersistedLocale } from '@/locale/catalog';
 import {
   calculateMiniSeekTime,
   getMiniProgressRiderStyle,
@@ -479,7 +474,6 @@ import {
 } from '@/utils/miniWindow';
 import { ARTWORK_SIZE, buildArtworkURL } from '@/utils/artwork';
 import type { Artist } from '@/types/domain';
-import { normalizePersistedLocale } from '@/locale/catalog';
 
 type LyricType = 'translation' | 'romaPronunciation';
 
@@ -553,32 +547,17 @@ export default defineComponent({
       rightClickLyric: null as RightClickLyric | null,
       isMini: false,
       miniTall: false,
-      taskbarDockState: { ...DEFAULT_TASKBAR_DOCK_STATE } as TaskbarDockState,
-      taskbarDockListenerCleanup: null as (() => void) | null,
-      taskbarDockGeneration: 0,
-      taskbarDockInitializationInFlight: false,
-      taskbarCompactSyncReady: false,
-      taskbarOverlayActionsCleanup: null as (() => void) | null,
-      taskbarOverlayActionsGeneration: 0,
-      taskbarOverlayActionsInitializationInFlight: false,
-      taskbarOverlayPublishTimer: null as ReturnType<typeof setTimeout> | null,
-      taskbarOverlayMotionCleanup: null as (() => void) | null,
-      taskbarOverlayReducedMotion: false,
-      taskbarDockHint: 'none' as TaskbarDockHint,
-      taskbarDockHintCleanup: null as (() => void) | null,
-      taskbarDockHintGeneration: 0,
       isAlwaysOnTop: false,
       pinDismissed: false,
       miniSeekDragging: false,
       miniSeekPreview: null as number | null,
       miniWindowDragStart: null as MiniDragStart | null,
+      taskbarDock: null as TaskbarDockSession | null,
+      taskbarDockHint: 'none' as TaskbarDockHint,
     };
   },
   computed: {
     ...mapState(useAppStore, ['player', 'settings', 'showLyrics', 'data']),
-    taskbarDockingAvailable() {
-      return isTaskbarDockingAvailable();
-    },
     activeLyricIndex() {
       if (this.miniSeekDragging && typeof this.miniSeekPreview === 'number') {
         return findActiveLyricIndex(this.lyricToShow, this.miniSeekPreview);
@@ -685,6 +664,37 @@ export default defineComponent({
     theme() {
       return this.settings.lyricsBackground === true ? 'dark' : 'auto';
     },
+    // What the Windows taskbar strip mirrors while the bar can dock.
+    taskbarSnapshot(): Omit<TaskbarOverlaySnapshot, 'reducedMotion'> | null {
+      if (!this.taskbarDock || !this.isMini) return null;
+      const duration = Math.max(0, this.player.currentTrackDuration || 0);
+      const progress = Number(this.miniSeekPreview ?? this.player.progress);
+      const emptyKind = this.lyricLoading
+        ? 'loading'
+        : this.noLyric
+        ? 'track'
+        : null;
+      return {
+        artwork: this.miniImageUrl,
+        trackTitle: this.currentTrack.name ?? '',
+        artistName: this.artist.name ?? '',
+        lyric: this.displayLyric,
+        emptyKind,
+        emptyLabel:
+          emptyKind === 'loading'
+            ? String(this.$t('common.loadingLyrics'))
+            : emptyKind
+            ? this.displayLyric
+            : '',
+        progress: Number.isFinite(progress)
+          ? Math.min(duration, Math.max(0, progress))
+          : 0,
+        duration,
+        playing: this.player.playing === true,
+        shuffle: this.player.shuffle === true,
+        locale: normalizePersistedLocale(this.settings.lang),
+      };
+    },
   },
   watch: {
     currentTrack() {
@@ -696,30 +706,13 @@ export default defineComponent({
       this.getLyric();
       this.getCoverColor();
       this.pushToTray();
-      this.scheduleTaskbarOverlaySnapshot();
     },
     // Push each active lyric to the tray.
     displayLyric() {
       this.pushToTray();
-      this.scheduleTaskbarOverlaySnapshot();
     },
-    lyricLoading() {
-      this.scheduleTaskbarOverlaySnapshot();
-    },
-    'player.progress'() {
-      this.scheduleTaskbarOverlaySnapshot();
-    },
-    'player.playing'() {
-      this.scheduleTaskbarOverlaySnapshot();
-    },
-    'player.shuffle'() {
-      this.scheduleTaskbarOverlaySnapshot();
-    },
-    'player.currentTrackDuration'() {
-      this.scheduleTaskbarOverlaySnapshot();
-    },
-    'settings.lang'() {
-      this.scheduleTaskbarOverlaySnapshot();
+    taskbarSnapshot(snapshot: Omit<TaskbarOverlaySnapshot, 'reducedMotion'>) {
+      if (snapshot) this.taskbarDock?.publish(snapshot);
     },
     showLyrics(show: boolean) {
       if (shouldRunLyricClock(show, isDesktopRuntime)) {
@@ -731,11 +724,13 @@ export default defineComponent({
     },
   },
   created() {
-    if (isTaskbarDockingAvailable()) {
-      void this.initializeTaskbarOverlayActions();
-      void this.initializeTaskbarDocking();
-      void this.initializeTaskbarDockHint();
-      this.initializeTaskbarOverlayMotionPreference();
+    if (isTaskbarDockingAvailable) {
+      this.taskbarDock = markRaw(
+        connectTaskbarDock({
+          onHint: hint => (this.taskbarDockHint = hint),
+          onAction: this.handleTaskbarAction,
+        })
+      );
     }
     this.getLyric();
     this.getCoverColor();
@@ -759,23 +754,7 @@ export default defineComponent({
     }
   },
   beforeUnmount: function () {
-    this.taskbarDockGeneration += 1;
-    this.taskbarDockInitializationInFlight = false;
-    this.taskbarDockListenerCleanup?.();
-    this.taskbarDockListenerCleanup = null;
-    this.taskbarOverlayActionsGeneration += 1;
-    this.taskbarOverlayActionsInitializationInFlight = false;
-    this.taskbarOverlayActionsCleanup?.();
-    this.taskbarOverlayActionsCleanup = null;
-    this.taskbarOverlayMotionCleanup?.();
-    this.taskbarOverlayMotionCleanup = null;
-    this.taskbarDockHintGeneration += 1;
-    this.taskbarDockHintCleanup?.();
-    this.taskbarDockHintCleanup = null;
-    if (this.taskbarOverlayPublishTimer !== null) {
-      clearTimeout(this.taskbarOverlayPublishTimer);
-      this.taskbarOverlayPublishTimer = null;
-    }
+    this.taskbarDock?.dispose();
     if (this.timer) {
       clearInterval(this.timer);
     }
@@ -811,229 +790,35 @@ export default defineComponent({
       });
       // Two lyric lines need at least 64px of height.
       this.miniTall = window.innerHeight >= 64;
-      const compactChanged = next !== this.isMini;
-      if (compactChanged) {
-        this.isMini = next;
-        this.pinDismissed = false;
-        // Hide window controls in compact mode.
-        this.setWindowButtons(!next);
-        // Compact mode changes tray lyric visibility.
-        this.pushToTray();
-      }
-      this.scheduleTaskbarOverlaySnapshot();
-      if (isTaskbarDockingAvailable()) {
-        if (!this.taskbarCompactSyncReady) {
-          // A later resize retries startup sync after a transient native error.
-          void this.initializeTaskbarDocking();
-        } else if (compactChanged) {
-          void this.syncTaskbarCompactMode(next);
-        }
-      }
+      this.taskbarDock?.syncCompact(next);
+      if (next === this.isMini) return;
+      this.isMini = next;
+      this.pinDismissed = false;
+      // Hide window controls in compact mode.
+      this.setWindowButtons(!next);
+      // Compact mode changes tray lyric visibility.
+      this.pushToTray();
     },
-    async initializeTaskbarOverlayActions() {
-      if (
-        !this.taskbarDockingAvailable ||
-        this.taskbarOverlayActionsCleanup ||
-        this.taskbarOverlayActionsInitializationInFlight
-      ) {
-        return;
-      }
-      this.taskbarOverlayActionsInitializationInFlight = true;
-      const generation = this.taskbarOverlayActionsGeneration || 1;
-      this.taskbarOverlayActionsGeneration = generation;
-      try {
-        const cleanup = await listenTaskbarOverlayActions(action => {
-          if (generation === this.taskbarOverlayActionsGeneration) {
-            this.handleTaskbarOverlayAction(action);
-          }
-        });
-        if (generation !== this.taskbarOverlayActionsGeneration) {
-          cleanup();
-          return;
-        }
-        this.taskbarOverlayActionsCleanup = cleanup;
-      } catch (error) {
-        console.warn('[taskbar-overlay] action listener failed', error);
-      } finally {
-        if (generation === this.taskbarOverlayActionsGeneration) {
-          this.taskbarOverlayActionsInitializationInFlight = false;
-        }
-      }
-    },
-    async initializeTaskbarDockHint() {
-      const generation = ++this.taskbarDockHintGeneration;
-      try {
-        const cleanup = await listenTaskbarDockHint(hint => {
-          this.taskbarDockHint = hint;
-        });
-        if (generation !== this.taskbarDockHintGeneration) {
-          cleanup();
-          return;
-        }
-        this.taskbarDockHintCleanup = cleanup;
-      } catch (error) {
-        console.warn('[taskbar-dock] hint listener failed', error);
-      }
-    },
-    handleTaskbarOverlayAction(action: TaskbarOverlayAction) {
+    handleTaskbarAction(action: TaskbarPlaybackAction) {
       switch (action.action) {
         case 'previous':
-          this.playPrevTrack();
-          break;
+          return this.playPrevTrack();
         case 'play':
-          this.playOrPause();
-          break;
+          return this.playOrPause();
         case 'next':
-          this.playNextTrack();
-          break;
+          return this.playNextTrack();
         case 'shuffle':
-          this.switchShuffle();
-          break;
+          return this.switchShuffle();
         case 'seek': {
-          const seekTo = clampTaskbarOverlaySeek(
-            action.value,
-            this.player.currentTrackDuration
-          );
-          if (seekTo !== null) this.player.progress = seekTo;
-          break;
-        }
-      }
-    },
-    initializeTaskbarOverlayMotionPreference() {
-      if (typeof window.matchMedia !== 'function') return;
-      const query = window.matchMedia('(prefers-reduced-motion: reduce)');
-      this.taskbarOverlayReducedMotion = query.matches;
-      const onChange = (event: MediaQueryListEvent) => {
-        this.taskbarOverlayReducedMotion = event.matches;
-        this.scheduleTaskbarOverlaySnapshot();
-      };
-      if (typeof query.addEventListener === 'function') {
-        query.addEventListener('change', onChange);
-        this.taskbarOverlayMotionCleanup = () =>
-          query.removeEventListener('change', onChange);
-      } else {
-        query.addListener(onChange);
-        this.taskbarOverlayMotionCleanup = () => query.removeListener(onChange);
-      }
-    },
-    scheduleTaskbarOverlaySnapshot() {
-      if (!this.taskbarDockingAvailable || !this.isMini) {
-        if (this.taskbarOverlayPublishTimer !== null) {
-          clearTimeout(this.taskbarOverlayPublishTimer);
-          this.taskbarOverlayPublishTimer = null;
-        }
-        return;
-      }
-      if (this.taskbarOverlayPublishTimer !== null) {
-        clearTimeout(this.taskbarOverlayPublishTimer);
-      }
-      this.taskbarOverlayPublishTimer = setTimeout(() => {
-        this.taskbarOverlayPublishTimer = null;
-        void this.publishTaskbarOverlaySnapshotNow();
-      }, 100);
-    },
-    async publishTaskbarOverlaySnapshotNow() {
-      if (!this.taskbarDockingAvailable || !this.isMini) return;
-      const rawDuration = this.player.currentTrackDuration;
-      const duration =
-        Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 0;
-      const rawProgress = this.miniSeekPreview ?? this.player.progress;
-      const progress = Number.isFinite(rawProgress)
-        ? Math.min(duration, Math.max(0, rawProgress))
-        : 0;
-      const emptyKind: TaskbarOverlaySnapshot['emptyKind'] = this.lyricLoading
-        ? 'loading'
-        : this.noLyric
-        ? 'track'
-        : null;
-      const snapshot: TaskbarOverlaySnapshot = {
-        artwork: this.miniImageUrl,
-        trackTitle:
-          typeof this.currentTrack.name === 'string'
-            ? this.currentTrack.name
-            : '',
-        artistName:
-          typeof this.artist.name === 'string' ? this.artist.name : '',
-        lyric: this.displayLyric,
-        emptyKind,
-        emptyLabel:
-          emptyKind === 'loading'
-            ? String(this.$t('common.loadingLyrics'))
-            : emptyKind === 'track'
-            ? this.displayLyric
-            : '',
-        progress,
-        duration,
-        elapsedLabel: formatTrackTime(progress) || '0:00',
-        durationLabel: formatTrackTime(duration) || '--:--',
-        playing: this.player.playing === true,
-        shuffle: this.player.shuffle === true,
-        locale: normalizePersistedLocale(this.settings.lang),
-        reducedMotion: this.taskbarOverlayReducedMotion,
-      };
-      try {
-        await publishTaskbarOverlaySnapshot(snapshot);
-      } catch (error) {
-        console.warn('[taskbar-overlay] snapshot publish failed', error);
-      }
-    },
-    async initializeTaskbarDocking() {
-      if (
-        !isTaskbarDockingAvailable() ||
-        this.taskbarCompactSyncReady ||
-        this.taskbarDockInitializationInFlight
-      ) {
-        return;
-      }
-      this.taskbarDockInitializationInFlight = true;
-      const generation = this.taskbarDockGeneration || 1;
-      this.taskbarDockGeneration = generation;
-      try {
-        if (!this.taskbarDockListenerCleanup) {
-          const cleanup = await listenTaskbarDockState(state => {
-            if (generation === this.taskbarDockGeneration) {
-              this.taskbarDockState = state;
-            }
-          });
-          if (generation !== this.taskbarDockGeneration) {
-            cleanup();
-            return;
+          const duration = this.player.currentTrackDuration;
+          if (duration > 0) {
+            this.player.progress = Math.min(
+              duration,
+              Math.max(0, action.value)
+            );
           }
-          this.taskbarDockListenerCleanup = cleanup;
-        }
-        // Register the event channel before reporting the initial compact mode.
-        const compact = this.isMini;
-        if (!(await this.syncTaskbarCompactMode(compact))) return;
-        if (
-          generation === this.taskbarDockGeneration &&
-          compact !== this.isMini
-        ) {
-          // A resize may change the compact mode while the startup sync waits.
-          await this.syncTaskbarCompactMode(this.isMini);
-        }
-      } catch (error) {
-        console.warn('[taskbar-dock] state connection failed', error);
-        if (generation === this.taskbarDockGeneration) {
-          this.taskbarCompactSyncReady = false;
-        }
-      } finally {
-        if (generation === this.taskbarDockGeneration) {
-          this.taskbarDockInitializationInFlight = false;
         }
       }
-    },
-    async syncTaskbarCompactMode(compact: boolean): Promise<boolean> {
-      return syncTaskbarCompactModeWithReadiness(
-        () => syncTaskbarCompactMode(compact),
-        state => {
-          this.taskbarDockState = state;
-        },
-        ready => {
-          this.taskbarCompactSyncReady = ready;
-        },
-        error =>
-          console.warn('[taskbar-dock] compact mode update failed', error)
-      );
     },
     pushToTray() {
       if (!isDesktopRuntime) return;
@@ -1096,13 +881,6 @@ export default defineComponent({
     },
     handleMiniDoubleClick(event: MouseEvent) {
       if (!shouldToggleMiniWindow(event)) return;
-      if (
-        this.taskbarDockingAvailable &&
-        (!this.taskbarCompactSyncReady ||
-          !canOpenMainPlayerFromCompactDoubleClick(this.taskbarDockState))
-      ) {
-        return;
-      }
       event.preventDefault();
       event.stopPropagation();
       this.$emit('expand-compact-window');

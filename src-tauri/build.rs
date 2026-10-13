@@ -1,66 +1,49 @@
 use std::{env, path::PathBuf, process::Command};
 
 fn main() {
-    println!("cargo:rerun-if-changed=../scripts/windows-taskbar-native.cs");
-    println!("cargo:rerun-if-env-changed=WINDIR");
-
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        compile_windows_helper();
+        compile_taskbar_helper();
     }
     tauri_build::build();
 }
 
-fn compile_windows_helper() {
+/// Builds the Windows taskbar helper with the .NET Framework compiler that
+/// ships with Windows; `tauri.windows.conf.json` bundles the result.
+fn compile_taskbar_helper() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"));
     let source = manifest
         .join("..")
         .join("scripts")
         .join("windows-taskbar-native.cs");
-    if !source.is_file() {
-        panic!(
-            "Windows taskbar helper source is missing: {}",
-            source.display()
-        );
-    }
+    println!("cargo:rerun-if-changed={}", source.display());
+    println!("cargo:rerun-if-env-changed=WINDIR");
 
-    let windows_dir = env::var_os("WINDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-    let compiler = [
-        windows_dir.join(r"Microsoft.NET\Framework64\v4.0.30319\csc.exe"),
-        windows_dir.join(r"Microsoft.NET\Framework\v4.0.30319\csc.exe"),
-    ]
-    .into_iter()
-    .find(|path| path.is_file())
-    .unwrap_or_else(|| {
-        panic!(
-            "Could not find the .NET Framework C# compiler under {}",
-            windows_dir.display()
-        )
-    });
+    let windows = env::var_os("WINDIR").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    let compiler = ["Framework64", "Framework"]
+        .map(|framework| windows.join(format!(r"Microsoft.NET\{framework}\v4.0.30319\csc.exe")))
+        .into_iter()
+        .find(|path| path.is_file())
+        .expect("the .NET Framework C# compiler is required to build on Windows");
 
-    let resources = manifest.join("resources");
-    std::fs::create_dir_all(&resources).expect("create Tauri resource directory");
-    let output = resources.join("windows-taskbar-native.exe");
-    let compiler_output = Command::new(&compiler)
-        .arg("/nologo")
-        .arg("/target:exe")
-        .arg("/platform:x64")
-        .arg("/optimize+")
+    let output = manifest.join("resources/windows-taskbar-native.exe");
+    std::fs::create_dir_all(output.parent().expect("resource directory"))
+        .expect("create the resource directory");
+    let result = Command::new(&compiler)
+        .args(["/nologo", "/target:exe", "/platform:x64", "/optimize+"])
         .arg(format!("/out:{}", output.display()))
-        .arg("/reference:Accessibility.dll")
-        .arg("/reference:System.Web.Extensions.dll")
+        .args([
+            "/reference:Accessibility.dll",
+            "/reference:System.Web.Extensions.dll",
+        ])
         .arg(&source)
         .output()
-        .unwrap_or_else(|error| panic!("Could not start {}: {error}", compiler.display()));
-    if !compiler_output.status.success() {
-        panic!(
-            "C# compiler failed to build the Windows taskbar helper ({}): {}{}",
-            compiler_output.status,
-            String::from_utf8_lossy(&compiler_output.stdout),
-            String::from_utf8_lossy(&compiler_output.stderr)
-        );
-    }
+        .expect("start the C# compiler");
+    assert!(
+        result.status.success(),
+        "the taskbar helper failed to compile: {}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
     println!(
         "cargo:rustc-env=TASKBAR_NATIVE_HELPER_PATH={}",
         output.display()

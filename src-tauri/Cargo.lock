@@ -9171,7 +9171,6 @@ dependencies = [
  "md-5",
  "mime_guess",
  "ncm-api-rs",
- "percent-encoding",
  "reqwest 0.12.23",
  "rustls 0.23.31",
  "rustls-native-certs",

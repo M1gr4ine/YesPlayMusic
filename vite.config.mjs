@@ -52,6 +52,14 @@ export default defineConfig(({ mode }) => {
       sourcemap: false,
       outDir: isTauri ? 'dist-tauri' : 'dist',
       rollupOptions: {
+        input: {
+          main: path.resolve(import.meta.dirname, 'index.html'),
+          // The Windows taskbar strip boots without the full player.
+          taskbarOverlay: path.resolve(
+            import.meta.dirname,
+            'taskbar-overlay.html'
+          ),
+        },
         output: {
           manualChunks: {
             'audio-vendor': ['howler', 'vue-slider-component'],

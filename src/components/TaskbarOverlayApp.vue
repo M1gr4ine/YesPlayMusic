@@ -1,272 +1,113 @@
 <template>
   <div
-    class="taskbar-overlay-root"
+    class="taskbar-overlay"
     :class="{
-      'taskbar-reduced-motion': snapshot?.reducedMotion,
-      'is-flying': flying,
+      'is-flying': visual.phase === 'snapping' || visual.phase === 'returning',
+      'reduced-motion': snapshot?.reducedMotion,
     }"
     :data-phase="visual.phase"
-    :data-visual-token="visual.token"
-    :style="{ '--flight-duration': `${flightDurationMs}ms` }"
+    :style="{ '--flight-duration': `${visual.durationMs}ms` }"
   >
-    <div class="taskbar-flight-backdrop" aria-hidden="true" />
+    <div class="flight-backdrop" aria-hidden="true" />
     <TaskbarPlayer
-      v-if="visual.phase !== 'hidden' && playerProps"
-      class="taskbar-overlay-player"
-      v-bind="playerProps"
-      @previous="invokeCommand({ action: 'previous' })"
-      @play="invokeCommand({ action: 'play' })"
-      @next="invokeCommand({ action: 'next' })"
-      @shuffle="invokeCommand({ action: 'shuffle' })"
-      @undock="invokeCommand({ action: 'undock' })"
-      @close="invokeCommand({ action: 'close' })"
-      @seek-pointerdown="startSeek"
-      @seek-pointermove="moveSeek"
-      @seek-pointerup="commitSeek"
-      @seek-pointercancel="commitSeek"
-      @nudge-seek="nudgeSeek"
+      v-if="visual.phase !== 'hidden' && snapshot"
+      class="player"
+      :snapshot="snapshot"
+      @command="send"
     />
-    <div class="taskbar-flight-outline" aria-hidden="true" />
+    <div class="flight-outline" aria-hidden="true" />
   </div>
 </template>
 
 <script setup lang="ts">
-import {
-  computed,
-  nextTick,
-  onBeforeUnmount,
-  onMounted,
-  ref,
-  shallowRef,
-  watch,
-} from 'vue';
+import { nextTick, onBeforeUnmount, onMounted, shallowRef, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import TaskbarPlayer from '@/components/TaskbarPlayer.vue';
 import {
   acknowledgeTaskbarOverlayVisual,
-  getTaskbarOverlayReadyState,
-  invokeTaskbarOverlayCommand,
-  listenTaskbarOverlayEvents,
-  normalizeTaskbarOverlayReadyState,
-  shouldApplyTaskbarOverlayVisual,
+  connectTaskbarOverlay,
+  sendTaskbarOverlayCommand,
 } from '@/services/windowsTaskbar';
 import type {
   TaskbarOverlayCommand,
   TaskbarOverlaySnapshot,
   TaskbarOverlayVisual,
 } from '@/services/windowsTaskbar';
-import { formatTrackTime } from '@/utils/trackTime';
-import { calculateMiniSeekTime } from '@/utils/miniPlayer';
 
 const snapshot = shallowRef<TaskbarOverlaySnapshot | null>(null);
 const visual = shallowRef<TaskbarOverlayVisual>({
   phase: 'hidden',
-  token: -1,
+  token: 0,
+  durationMs: 240,
 });
-const seekPreview = ref<number | null>(null);
 const { locale } = useI18n({ useScope: 'global' });
-
-const DEFAULT_FLIGHT_DURATION_MS = 240;
-const flying = computed(
-  () => visual.value.phase === 'snapping' || visual.value.phase === 'returning'
-);
-const flightDurationMs = computed(
-  () => visual.value.durationMs ?? DEFAULT_FLIGHT_DURATION_MS
-);
-
-const playerProps = computed(() => {
-  const current = snapshot.value;
-  if (!current) return null;
-  const progress = seekPreview.value ?? current.progress;
-  return {
-    artwork: current.artwork,
-    trackTitle: current.trackTitle,
-    artistName: current.artistName,
-    lyric: current.lyric,
-    emptyKind: current.emptyKind,
-    emptyLabel: current.emptyLabel,
-    progress,
-    duration: current.duration,
-    elapsedLabel:
-      seekPreview.value === null
-        ? current.elapsedLabel
-        : formatTrackTime(progress) || '0:00',
-    durationLabel: current.durationLabel,
-    playing: current.playing,
-    shuffle: current.shuffle,
-  };
-});
-
-let cleanup: (() => void) | null = null;
-let disposed = false;
-let snapshotVersion = 0;
-let visualAckGeneration = 0;
-let lastAcknowledgedVisualToken = -1;
-let visualAckRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let disconnect: (() => void) | null = null;
+let unmounted = false;
 
 watch(
   () => snapshot.value?.locale,
-  nextLocale => {
-    if (nextLocale) locale.value = nextLocale;
-  },
-  { immediate: true }
+  next => {
+    if (next) locale.value = next;
+  }
 );
 
-function applySnapshot(next: TaskbarOverlaySnapshot) {
-  snapshotVersion += 1;
-  snapshot.value = next;
-}
-
-function waitForTwoFrames(): Promise<void> {
-  return new Promise(resolve => {
-    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-  });
-}
-
-function scheduleVisualAcknowledgement(next: TaskbarOverlayVisual) {
-  if (next.token === 0 || next.token <= lastAcknowledgedVisualToken) return;
-  const generation = ++visualAckGeneration;
-  void (async () => {
-    await nextTick();
-    await waitForTwoFrames();
-    if (disposed || generation !== visualAckGeneration) return;
-    const latest = visual.value;
-    if (latest.token !== next.token || latest.phase !== next.phase) return;
-    try {
-      const acknowledged = await acknowledgeTaskbarOverlayVisual(next.token);
-      if (
-        acknowledged &&
-        visual.value.token === next.token &&
-        visual.value.phase === next.phase
-      ) {
-        lastAcknowledgedVisualToken = next.token;
-      }
-    } catch (error) {
-      console.warn('[taskbar-overlay] visual acknowledgement failed', error);
-      if (visualAckRetryTimer !== null) clearTimeout(visualAckRetryTimer);
-      visualAckRetryTimer = setTimeout(() => {
-        visualAckRetryTimer = null;
-        if (
-          !disposed &&
-          visual.value.token === next.token &&
-          visual.value.phase === next.phase
-        ) {
-          scheduleVisualAcknowledgement(next);
-        }
-      }, 100);
-    }
-  })();
-}
-
-function applyVisual(next: TaskbarOverlayVisual) {
-  const current = visual.value;
-  if (!shouldApplyTaskbarOverlayVisual(current, next)) return;
+// The controller reveals a flight only after its phase has been painted.
+async function applyVisual(next: TaskbarOverlayVisual) {
+  if (next.token <= visual.value.token) return;
   visual.value = next;
-  scheduleVisualAcknowledgement(next);
+  await nextTick();
+  await new Promise(resolve =>
+    requestAnimationFrame(() => requestAnimationFrame(resolve))
+  );
+  if (visual.value.token !== next.token) return;
+  acknowledgeTaskbarOverlayVisual(next.token).catch(error =>
+    console.warn('[taskbar-overlay] visual acknowledgement failed', error)
+  );
 }
 
-async function connectOverlay() {
-  try {
-    const unlisten = await listenTaskbarOverlayEvents({
-      onSnapshot: applySnapshot,
-      onVisual: applyVisual,
-    });
-    if (disposed) {
-      unlisten();
-      return;
-    }
-    cleanup = unlisten;
+function send(command: TaskbarOverlayCommand) {
+  sendTaskbarOverlayCommand(command).catch(error =>
+    console.warn('[taskbar-overlay] command failed', error)
+  );
+}
 
-    const versionBeforeReady = snapshotVersion;
-    const ready = normalizeTaskbarOverlayReadyState(
-      await getTaskbarOverlayReadyState()
-    );
-    if (!ready) throw new Error('native overlay readiness state is invalid');
-    if (snapshotVersion === versionBeforeReady && ready.snapshot) {
-      applySnapshot(ready.snapshot);
-    }
-    applyVisual(ready.visual);
+onMounted(async () => {
+  try {
+    const stop = await connectTaskbarOverlay({
+      onSnapshot: next => (snapshot.value = next),
+      onVisual: next => void applyVisual(next),
+    });
+    if (unmounted) stop();
+    else disconnect = stop;
   } catch (error) {
     console.warn('[taskbar-overlay] connection failed', error);
   }
-}
-
-async function invokeCommand(command: TaskbarOverlayCommand) {
-  try {
-    await invokeTaskbarOverlayCommand(command);
-  } catch (error) {
-    console.warn('[taskbar-overlay] command failed', error);
-  }
-}
-
-function getSeekTime(event: PointerEvent): number | null {
-  const current = snapshot.value;
-  const target = event.currentTarget;
-  if (!current || current.duration <= 0 || !(target instanceof HTMLElement)) {
-    return null;
-  }
-  const bounds = target.getBoundingClientRect();
-  return calculateMiniSeekTime(
-    event.clientX,
-    bounds.left,
-    bounds.width,
-    current.duration
-  );
-}
-
-function startSeek(event: PointerEvent) {
-  seekPreview.value = getSeekTime(event);
-}
-
-function moveSeek(event: PointerEvent) {
-  if (seekPreview.value === null) return;
-  const next = getSeekTime(event);
-  if (next !== null) seekPreview.value = next;
-}
-
-function commitSeek(event: PointerEvent) {
-  if (seekPreview.value === null) return;
-  moveSeek(event);
-  const value = seekPreview.value;
-  seekPreview.value = null;
-  if (value !== null) void invokeCommand({ action: 'seek', value });
-}
-
-function nudgeSeek(offset: number) {
-  const current = snapshot.value;
-  if (!current || current.duration <= 0) return;
-  const position = Math.min(
-    current.duration,
-    Math.max(0, (seekPreview.value ?? current.progress) + offset)
-  );
-  void invokeCommand({ action: 'seek', value: position });
-}
-
-onMounted(() => void connectOverlay());
+});
 
 onBeforeUnmount(() => {
-  disposed = true;
-  visualAckGeneration += 1;
-  if (visualAckRetryTimer !== null) clearTimeout(visualAckRetryTimer);
-  cleanup?.();
+  unmounted = true;
+  disconnect?.();
 });
 </script>
 
 <style scoped>
-.taskbar-overlay-root {
+.taskbar-overlay {
   position: relative;
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background: transparent;
 }
 
-/* The flying strip keeps the floating player's glass and glow, then lands
-   transparent so only the strip remains on the taskbar. */
-.taskbar-flight-backdrop {
+.flight-backdrop,
+.player,
+.flight-outline {
   position: absolute;
-  z-index: 0;
   inset: 0;
+}
+
+/* The flying strip keeps the floating player's glass, then lands transparent
+   so only the strip remains on the taskbar. */
+.flight-backdrop {
   border: 1px solid rgba(255, 255, 255, 0.16);
   background: linear-gradient(
     135deg,
@@ -278,16 +119,12 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
-.taskbar-overlay-player {
-  position: absolute;
+.player {
   z-index: 1;
-  inset: 0;
 }
 
-.taskbar-flight-outline {
-  position: absolute;
+.flight-outline {
   z-index: 2;
-  inset: 0;
   border: 1px solid rgba(255, 255, 255, 0.9);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3),
     inset 0 0 14px rgba(255, 255, 255, 0.18);
@@ -296,51 +133,38 @@ onBeforeUnmount(() => {
   transition: opacity 180ms ease-out;
 }
 
-.is-flying .taskbar-flight-outline {
+.is-flying .flight-outline {
   opacity: 1;
   transition: none;
 }
 
-.is-flying .taskbar-overlay-player {
+.is-flying .player {
   pointer-events: none;
 }
 
-[data-phase='snapping'] .taskbar-flight-backdrop {
-  animation: taskbar-glass-out var(--flight-duration)
-    cubic-bezier(0.77, 0, 0.175, 1) both;
+[data-phase='snapping'] .flight-backdrop {
+  animation: fade-out var(--flight-duration) cubic-bezier(0.77, 0, 0.175, 1)
+    both;
 }
 
-[data-phase='returning'] .taskbar-flight-backdrop {
-  animation: taskbar-glass-in var(--flight-duration)
-    cubic-bezier(0.77, 0, 0.175, 1) both;
+[data-phase='returning'] .flight-backdrop {
+  animation: fade-in var(--flight-duration) cubic-bezier(0.77, 0, 0.175, 1) both;
 }
 
 /* Reduced motion has no geometric travel: the strip simply fades. */
-.taskbar-reduced-motion .taskbar-flight-backdrop {
+.reduced-motion .flight-backdrop {
   animation: none;
 }
 
-.taskbar-reduced-motion[data-phase='snapping'] .taskbar-overlay-player,
-.taskbar-reduced-motion[data-phase='snapping'] .taskbar-flight-outline {
-  animation: taskbar-fade-in var(--flight-duration) ease-out both;
+.reduced-motion[data-phase='snapping'] :is(.player, .flight-outline) {
+  animation: fade-in var(--flight-duration) ease-out both;
 }
 
-.taskbar-reduced-motion[data-phase='returning'] .taskbar-overlay-player,
-.taskbar-reduced-motion[data-phase='returning'] .taskbar-flight-outline {
-  animation: taskbar-fade-out var(--flight-duration) ease-in both;
+.reduced-motion[data-phase='returning'] :is(.player, .flight-outline) {
+  animation: fade-out var(--flight-duration) ease-in both;
 }
 
-@keyframes taskbar-glass-out {
-  from {
-    opacity: 1;
-  }
-
-  to {
-    opacity: 0;
-  }
-}
-
-@keyframes taskbar-glass-in {
+@keyframes fade-in {
   from {
     opacity: 0;
   }
@@ -350,17 +174,7 @@ onBeforeUnmount(() => {
   }
 }
 
-@keyframes taskbar-fade-in {
-  from {
-    opacity: 0;
-  }
-
-  to {
-    opacity: 1;
-  }
-}
-
-@keyframes taskbar-fade-out {
+@keyframes fade-out {
   from {
     opacity: 1;
   }

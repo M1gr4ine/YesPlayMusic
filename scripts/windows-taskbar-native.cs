@@ -1,7 +1,8 @@
-// Build with the Windows .NET Framework compiler. No injection into Explorer.
+// Taskbar helper for the Windows taskbar strip, built by src-tauri/build.rs.
+// It reads Explorer's taskbars and parents the overlay into one; it never
+// injects code into Explorer. Requests and replies are JSON lines on stdio.
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Web.Script.Serialization;
@@ -136,7 +137,7 @@ public static class TaskbarNative {
     return rect.left<=info.monitor.left&&rect.top<=info.monitor.top&&rect.right>=info.monitor.right&&rect.bottom>=info.monitor.bottom;
   }
   static Dictionary<string,object> Observation(IntPtr bar,RECT r,RECT monitor,bool suspended) {
-    return new Dictionary<string,object>{{"handle",bar.ToInt64().ToString()},{"taskbar",Rect(r)},{"monitor",Rect(monitor)},{"free",null},{"dpi",GetDpiForWindow(bar)},{"awareness",GetAwarenessFromDpiAwarenessContext(GetWindowDpiAwarenessContext(bar))},{"suspended",suspended}};
+    return new Dictionary<string,object>{{"handle",bar.ToInt64().ToString()},{"taskbar",Rect(r)},{"monitor",Rect(monitor)},{"free",null},{"dpi",GetDpiForWindow(bar)},{"suspended",suspended}};
   }
   static List<Dictionary<string,object>> Probe() {
     probeComplete=true;
@@ -243,21 +244,6 @@ public static class TaskbarNative {
     }
     parent=IntPtr.Zero;attachedTo=IntPtr.Zero;
   }
-  static void RestoreExplicit(Dictionary<string,object> frame) {
-    if(!OwnWindow())throw new System.ComponentModel.Win32Exception(1400,"Player window is no longer valid");
-    if(Convert.ToString(frame["hwnd"])!=window.ToInt64().ToString())throw new Exception("Recovery frame belongs to another window");
-    IntPtr restoreParent=new IntPtr(long.Parse(Convert.ToString(frame["parent"])));
-    IntPtr restoreStyle=new IntPtr(long.Parse(Convert.ToString(frame["style"])));
-    IntPtr restoreExStyle=new IntPtr(long.Parse(Convert.ToString(frame["exStyle"])));
-    var rect=(Dictionary<string,object>)frame["rect"];
-    int x=Convert.ToInt32(rect["x"]),y=Convert.ToInt32(rect["y"]),w=Convert.ToInt32(rect["width"]),h=Convert.ToInt32(rect["height"]);
-    if(w<=0||h<=0||w>100000||h>100000)throw new Exception("Recovery frame geometry is invalid");
-    SetParentChecked(restoreParent);
-    SetLongChecked(-16,restoreStyle);SetLongChecked(-20,restoreExStyle);
-    if(!SetWindowPos(window,IntPtr.Zero,x,y,w,h,0x4|0x10|0x20|0x200))throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-    if(GetParent(window)!=restoreParent)throw new Exception("Windows did not restore the player parent");
-    parent=IntPtr.Zero;attachedTo=IntPtr.Zero;
-  }
   static object Run(Dictionary<string,object> req) {
     string op=(string)req["op"];
     if(op=="probe")return ProbeResult();
@@ -271,16 +257,7 @@ public static class TaskbarNative {
       if(attachedHost!=IntPtr.Zero&&EnsureTaskbarChild(attachedHost))RepositionAfterFrameChange(attachedHost);
       return new {visible=IsWindowVisible(window)};
     }
-    if(op=="hide"){ShowWindow(window,0);return new {visible=IsWindowVisible(window)};}
-    if(op=="inspect"){
-      RECT r;if(!GetWindowRect(window,out r))throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-      return new {hwnd=window.ToInt64().ToString(),parent=GetParent(window).ToInt64().ToString(),rect=Rect(r),visible=IsWindowVisible(window),style=GetWindowLongPtr(window,-16).ToInt64().ToString(),exStyle=GetWindowLongPtr(window,-20).ToInt64().ToString(),awareness=GetAwarenessFromDpiAwarenessContext(GetWindowDpiAwarenessContext(window))};
-    }
     if(op=="detach"){Restore();return new {ok=true};}
-    if(op=="restore"){
-      var frame=(Dictionary<string,object>)req["frame"];
-      RestoreExplicit(frame);return new {ok=true};
-    }
     if(op=="attach"){
       string handle=Convert.ToString(req["bar"]);
       var bar=FindBar(handle);
@@ -314,7 +291,6 @@ public static class TaskbarNative {
   [STAThread] public static void Main(string[] args) {
     Console.InputEncoding=Encoding.UTF8;Console.OutputEncoding=new UTF8Encoding(false);
     SetThreadDpiAwarenessContext(new IntPtr(-4));
-    if(args.Length==1&&args[0]=="--probe"){Console.WriteLine(Json.Serialize(ProbeResult()));return;}
     if(args.Length!=2)return;
     owner=uint.Parse(args[0]);window=new IntPtr(long.Parse(args[1]));
     try{

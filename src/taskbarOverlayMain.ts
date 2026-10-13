@@ -2,7 +2,6 @@ import { createApp } from 'vue';
 import { createI18n } from 'vue-i18n';
 import TaskbarOverlayApp from '@/components/TaskbarOverlayApp.vue';
 import { DEFAULT_LOCALE, localeMessages } from '@/locale/catalog';
-import '@/assets/css/taskbarOverlay.scss';
 
 const i18n = createI18n({
   legacy: false,

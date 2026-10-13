@@ -8,19 +8,16 @@
   >
     <Scrollbar
       v-show="!showLyrics"
-      class="app-shell-scrollbar"
       ref="scrollbar"
       @drag-state-change="userSelectNone = $event"
     />
     <Navbar
       v-show="showNavbar"
-      class="app-shell-navbar"
       ref="navbar"
       :compact-window-expanded="compactWindowExpanded"
       @restore-compact-window="restoreCompactWindow"
     />
     <main
-      class="app-shell-main"
       ref="main"
       data-scroll-container
       :style="{ overflow: enableScrolling ? 'auto' : 'hidden' }"
@@ -42,12 +39,7 @@
       </router-view>
     </main>
     <transition name="slide-up">
-      <Player
-        v-if="enablePlayer"
-        v-show="showPlayer"
-        class="app-shell-player"
-        ref="player"
-      />
+      <Player v-if="enablePlayer" v-show="showPlayer" ref="player" />
     </transition>
     <Toast />
     <ModalAddTrackToPlaylist v-if="isAccountLoggedIn" />

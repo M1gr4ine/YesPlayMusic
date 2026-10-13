@@ -1,36 +1,27 @@
-# Windows compact-player taskbar docking
+# Windows 任务栏吸附
 
-On Windows, drag a normal compact player close to a supported horizontal taskbar. A highlighted outline uses the customized Electron overlay's 240ms curve to travel into the taskbar; after that animation, only the taskbar strip is visible on the desktop. Clicking its upward arrow reverses the outline transition and then restores the compact player at its original size and position. Ordinary compact mode has no additional docking button. Reduced motion replaces geometric travel with a short fade.
+Windows 上把紧凑播放条拖到水平任务栏附近（上下 40 DIP 内）会出现描边提示，松手后播放条沿
+`cubic-bezier(.77,0,.175,1)` 240ms 飞进任务栏，变成一条 380 DIP 宽的歌词条；点条上的返回
+按钮反向飞回原位。系统开启减少动态效果时只做 120ms 原地淡入淡出。
 
-## Window and playback ownership
+## 结构
 
-The real main HWND stays top-level. The controller never reparents, reshapes or changes the decorations, resize policy or shadow of the real player. Its WebView retains the existing playback session while an independent `taskbar-lyrics` window provides the animation and attached content. Only that dedicated, transparent, borderless, non-resizable, shadowless window is parented into Explorer. It uses fixed 380 logical-pixel width and the selected taskbar's real height.
+- **播放器窗口不动**：`main` 永远是顶层窗口，吸附时只是隐藏，父窗口、样式、尺寸都不变，
+  播放会话也只有这一个。
+- **歌词条是独立窗口**：`taskbar-lyrics` 是透明、无边框、不可聚焦的 WebView，加载
+  `taskbar-overlay.html` 这个轻量入口（不挂 App、Pinia、Player）。它只渲染主窗口发来的
+  展示快照，按钮动作原样转回主窗口执行。
+- **原生 helper**：`scripts/windows-taskbar-native.cs` 由 `build.rs` 用系统自带的 .NET
+  Framework 编译器编译并随包分发。Rust 通过 stdin/stdout 的 JSON 行协议让它探测任务栏
+  （空白区、DPI、前台是否全屏）并把歌词条 `SetParent` 进任务栏；helper 收到 EOF 或
+  `detach` 时自行还原。它不向 Explorer 注入任何代码。
+- **控制器**：`src-tauri/src/taskbar_docking/` 每 500ms 收敛一次窗口状态；纯几何与载荷
+  校验在 `taskbar_docking_model.rs`，在所有平台的 CI 上测试。
 
-The overlay entry does not mount the main App or initialize Pinia, Player, migrations or account state. The existing player supplies bounded presentation snapshots; validated overlay actions return to that player. Thus progress, lyrics and play/shuffle/seek controls use the same playback session.
+## 不变量
 
-The attached appearance matches the customized Electron taskbar layout: a full-height square cover, 10-pixel title and artist on the top row, a 14-pixel single lyric below, four transport controls, separate return and close buttons, and a one-pixel progress line beginning after the cover. The background and native outer edges are transparent; the attached outer and client rectangles coincide.
-
-## Behavior and recovery
-
-Dock status is floating, docking, docked, undocking or waiting. Transitions block accidental compact expansion and stale frame persistence. The real player disappears from the desktop before the outline appears and returns only after the reverse animation finishes. An actual renderer-ready and visual-ready handshake prevents showing an uninitialized overlay.
-
-Fullscreen or unreadable taskbar probes suppress the independent layer while preserving attachment intent. Single-instance or tray reopening during fullscreen keeps it suppressed. Recovery resumes only the taskbar layer without taking focus. Helper failures recover the dedicated overlay without rebuilding or changing the real player. Overlay close follows the original lyrics behavior: hide the visual layer while playback continues; an explicit reopen restores it.
-
-Non-Windows builds keep their existing behavior. The helper is compiled and bundled only on Windows.
-
-## Verification
-
-Run Bun tests, full type checks and the production renderer build. For Rust changes, run workspace tests, Clippy and fmt. The local Windows environment has two known non-admin symbolic-link EPERM tests; report those explicitly rather than excluding them.
-
-Native tests must identify the main HWND and the `taskbar-lyrics` HWND separately:
-
-- Start with a valid floating compact frame (for example 900 by 150). Verify the main HWND remains parentless, its native styles and rectangle stay unchanged throughout both directions, and ordinary compact mode has no additional button.
-- Sample actual native visibility during forward and reverse transitions. Main must be absent by the first visible outline frame and remain absent until the reverse outline is gone. Verify the original curve/duration and the reduced-motion variant.
-- Verify only the dedicated overlay is attached to the selected taskbar at 380 DIP by its actual height, with coincident native outer/client rectangles and no non-client edge bits.
-- Test on another supported monitor. Verify true hidden-player playback progress and matching snapshots, and actual play/shuffle/seek button delivery to the one existing player.
-- Exercise rapid requests and verify stale transition generations cannot reattach or reveal a discarded layer.
-- Make a known foreground fullscreen fixture active, then verify the taskbar layer stays hidden, including through reopening, and recovers without taking focus.
-- Stop only this host's exact helper identified by its executable, host PID and overlay HWND; verify bounded independent-overlay recovery.
-- Verify close/reopen intent, ordinary compact double-click expansion, and exit teardown. No taskbar HWND should remain owned by the exiting host.
-
-State/geometry unit tests supplement these tests; they cannot establish native HWND behavior or animation visibility timing.
+- 前台是全屏程序或探测结果不可信时，两个窗口都隐藏，吸附意图保留，恢复后不抢焦点。
+- 歌词条只在画完当前飞行阶段（按 token 确认）后才显示，绝不闪出旧内容。
+- 吸附状态下无法撤销的附着（helper 意外退出）直接销毁歌词条窗口，由控制器重建一个干净的。
+- 窗口回调运行在 UI 线程，只读写原子量；持有状态锁的工作线程可能正在等 UI 线程。
+- 关闭歌词条只隐藏可见层，播放继续；托盘或第二实例重新打开时恢复。
