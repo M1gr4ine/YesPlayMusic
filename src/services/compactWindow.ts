@@ -10,6 +10,9 @@ const MIN_WINDOW_SIZE = Object.freeze({ width: 300, height: 48 });
 const MAX_WINDOW_EDGE = 8192;
 let compactWindowTransitioning = false;
 
+// The edge the compact bar stays on while the window grows away from it.
+export type CompactExpansionOrigin = 'top' | 'bottom';
+
 export interface CompactWindowFrame {
   x: number | null;
   y: number | null;
@@ -143,64 +146,34 @@ export function buildCompactWindowTransitionFrame(
   };
 }
 
-interface CompactWindowWorkArea {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
+interface PhysicalRect {
+  position: { x: number; y: number };
+  size: { width: number; height: number };
 }
 
-export function buildWindowsCompactExpansionFrame(
-  currentFrame: CompactWindowFrameInput,
-  targetFrame: CompactWindowFrameInput,
-  workArea: CompactWindowWorkArea,
+// Grow away from the nearer work-area edge and stay on screen. Frame sizes
+// are logical, while positions and the monitor work area are physical.
+export function fitCompactExpansionFrame(
+  current: CompactWindowFrame,
+  target: CompactWindowFrame,
+  workArea: PhysicalRect,
   scaleFactor: number
-): CompactWindowFrame | null {
-  const current = normalizeCompactWindowFrame(currentFrame);
-  const target = buildCompactWindowTransitionFrame(currentFrame, targetFrame);
-  if (!current || !target) return null;
-  if (
-    current.x === null ||
-    current.y === null ||
-    !Number.isFinite(scaleFactor) ||
-    scaleFactor <= 0 ||
-    ![workArea.x, workArea.y, workArea.width, workArea.height].every(
-      Number.isFinite
-    ) ||
-    workArea.width / scaleFactor < MIN_WINDOW_SIZE.width ||
-    workArea.height / scaleFactor < MIN_WINDOW_SIZE.height
-  )
-    return target;
-
-  // Frame sizes are logical; saved positions and monitor work areas are physical.
-  const width = Math.min(
-    target.width,
-    Math.floor(workArea.width / scaleFactor)
-  );
-  const height = Math.min(
-    target.height,
-    Math.floor(workArea.height / scaleFactor)
-  );
-  const physicalWidth = width * scaleFactor;
-  const physicalHeight = height * scaleFactor;
-  const compactBottom = current.y + current.height * scaleFactor;
-  const lowerHalf =
-    current.y + (current.height * scaleFactor) / 2 >=
-    workArea.y + workArea.height / 2;
-  const y = lowerHalf ? compactBottom - physicalHeight : current.y;
+): CompactWindowFrame {
+  if (current.x === null || current.y === null) return target;
+  const { x: areaX, y: areaY } = workArea.position;
+  const { width: areaWidth, height: areaHeight } = workArea.size;
+  const width = Math.min(target.width, Math.floor(areaWidth / scaleFactor));
+  const height = Math.min(target.height, Math.floor(areaHeight / scaleFactor));
+  const currentHeight = current.height * scaleFactor;
+  const growUp = current.y + currentHeight / 2 >= areaY + areaHeight / 2;
+  const y = growUp
+    ? current.y + currentHeight - height * scaleFactor
+    : current.y;
+  const clamp = (value: number, min: number, max: number) =>
+    Math.round(Math.min(Math.max(value, min), max));
   return {
-    x: Math.round(
-      Math.min(
-        Math.max(current.x, workArea.x),
-        workArea.x + workArea.width - physicalWidth
-      )
-    ),
-    y: Math.round(
-      Math.min(
-        Math.max(y, workArea.y),
-        workArea.y + workArea.height - physicalHeight
-      )
-    ),
+    x: clamp(current.x, areaX, areaX + areaWidth - width * scaleFactor),
+    y: clamp(y, areaY, areaY + areaHeight - height * scaleFactor),
     width,
     height,
   };
@@ -208,30 +181,25 @@ export function buildWindowsCompactExpansionFrame(
 
 async function buildCompactExpansionFrame(
   current: CompactWindowFrame,
-  target: CompactWindowFrame
+  remembered: CompactWindowFrame
 ): Promise<CompactWindowFrame | null> {
-  if (isWindows && isTauriRuntime) {
-    try {
-      const { currentMonitor } = await import('@tauri-apps/api/window');
-      const monitor = await currentMonitor();
-      if (monitor) {
-        return buildWindowsCompactExpansionFrame(
-          current,
-          target,
-          {
-            x: monitor.workArea.position.x,
-            y: monitor.workArea.position.y,
-            width: monitor.workArea.size.width,
-            height: monitor.workArea.size.height,
-          },
-          monitor.scaleFactor
-        );
-      }
-    } catch (_) {
-      // A monitor query failure must not prevent the existing expand action.
+  const target = buildCompactWindowTransitionFrame(current, remembered);
+  if (!target || !isWindows) return target;
+  try {
+    const { currentMonitor } = await import('@tauri-apps/api/window');
+    const monitor = await currentMonitor();
+    if (monitor) {
+      return fitCompactExpansionFrame(
+        current,
+        target,
+        monitor.workArea,
+        monitor.scaleFactor
+      );
     }
+  } catch (error) {
+    console.warn('[compact-window] monitor query failed', error);
   }
-  return buildCompactWindowTransitionFrame(current, target);
+  return target;
 }
 
 export function isCompactWindowPhysicalSize(
@@ -331,26 +299,11 @@ export async function rememberCurrentCompactWindowFrame() {
   };
 }
 
-export async function applyCompactExpansionFrameWithRollback(
-  current: CompactWindowFrame,
-  target: CompactWindowFrame,
-  apply: (frame: CompactWindowFrame) => Promise<boolean>
-): Promise<boolean> {
-  try {
-    return await apply(target);
-  } catch (error) {
-    // Native sizing may succeed before positioning fails.
-    try {
-      await apply(current);
-    } catch (rollbackError) {
-      console.warn('[compact-window] frame rollback failed', rollbackError);
-    }
-    throw error;
-  }
-}
-
 export async function expandCompactWindow(
-  options: { onPrepared?: (origin: 'top' | 'bottom') => void } = {}
+  options: {
+    // Runs after the target frame is known, right before the native resize.
+    beforeResize?: (origin: CompactExpansionOrigin) => Promise<void>;
+  } = {}
 ) {
   if (compactWindowTransitioning) return false;
   const snapshot = await captureCurrentCompactWindowSnapshot();
@@ -369,21 +322,21 @@ export async function expandCompactWindow(
   if (!target) return false;
   compactWindowTransitioning = true;
   try {
-    const windowsFeatureActive = isWindows && isTauriRuntime;
-    if (windowsFeatureActive) {
-      options.onPrepared?.(
-        target.y !== null && current.y !== null && target.y < current.y
-          ? 'bottom'
-          : 'top'
+    await options.beforeResize?.(
+      target.y !== null && current.y !== null && target.y < current.y
+        ? 'bottom'
+        : 'top'
+    );
+    let expanded: boolean;
+    try {
+      expanded = await applyCompactWindowFrame(target);
+    } catch (error) {
+      // Native resizing can succeed before repositioning fails.
+      await applyCompactWindowFrame(current).catch(rollbackError =>
+        console.warn('[compact-window] frame rollback failed', rollbackError)
       );
+      throw error;
     }
-    const expanded = windowsFeatureActive
-      ? await applyCompactExpansionFrameWithRollback(
-          current,
-          target,
-          applyCompactWindowFrame
-        )
-      : await applyCompactWindowFrame(target);
     if (expanded) rememberCompactWindowFrame(target);
     return expanded;
   } finally {

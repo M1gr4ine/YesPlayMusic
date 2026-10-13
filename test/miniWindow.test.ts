@@ -18,13 +18,8 @@ const lyricsView = readFileSync(
 function targetMatching(selector: string | null = null): EventTarget {
   return Object.assign(Object.create(null) as EventTarget, {
     closest(query: string) {
-      return selector &&
-        query
-          .split(',')
-          .map(value => value.trim())
-          .includes(selector)
-        ? { selector }
-        : null;
+      expect(query).toBe(MINI_WINDOW_INTERACTIVE_SELECTOR);
+      return selector ? { selector } : null;
     },
   });
 }
@@ -171,77 +166,5 @@ describe('迷你窗口拖拽边界', () => {
     expect(isBarWindowSize({ width: 300, height: 500 })).toBe(false);
     // 窄高窗口仍会路由到歌词页，只是不进播放条布局。
     expect(isMiniWindowSize({ width: 560, height: 800 })).toBe(true);
-  });
-});
-
-describe('Windows compact text gestures', () => {
-  const windowsTextOptions = { allowTextDrag: true };
-
-  test('allows text dragging only when explicitly opted in', () => {
-    const event = {
-      button: 0,
-      detail: 1,
-      target: targetMatching('.mini-copyable'),
-    };
-    expect(shouldStartMiniWindowDrag(event)).toBe(false);
-    expect(shouldStartMiniWindowDrag(event, windowsTextOptions)).toBe(true);
-  });
-
-  test('preserves every interactive control when text dragging is enabled', () => {
-    for (const selector of MINI_WINDOW_INTERACTIVE_SELECTOR.split(',').map(
-      value => value.trim()
-    )) {
-      if (selector === '.mini-copyable') continue;
-      const event = { button: 0, detail: 1, target: targetMatching(selector) };
-      expect(shouldStartMiniWindowDrag(event, windowsTextOptions)).toBe(false);
-      expect(shouldToggleMiniWindow(event, windowsTextOptions)).toBe(false);
-    }
-  });
-
-  test('clears existing text selection before a Windows lyric drag', () => {
-    let cleared = 0;
-    let prevented = 0;
-    const selection = Object.assign(Object.create(null) as Selection, {
-      removeAllRanges() {
-        cleared += 1;
-      },
-    });
-    expect(
-      beginMiniWindowDragGesture(
-        {
-          button: 0,
-          detail: 1,
-          target: targetMatching('.mini-copyable'),
-          preventDefault() {
-            prevented += 1;
-          },
-        },
-        selection,
-        windowsTextOptions
-      )
-    ).toBe(true);
-    expect(cleared).toBe(1);
-    expect(prevented).toBe(1);
-  });
-
-  test('double-clicking Windows text expands without starting a second-press drag', () => {
-    const event = {
-      button: 0,
-      detail: 2,
-      target: targetMatching('.mini-copyable'),
-    };
-    expect(shouldStartMiniWindowDrag(event, windowsTextOptions)).toBe(false);
-    expect(shouldToggleMiniWindow(event, windowsTextOptions)).toBe(true);
-    expect(shouldToggleMiniWindow(event)).toBe(false);
-  });
-
-  test('right-clicking Windows text keeps its existing behavior', () => {
-    const event = {
-      button: 2,
-      detail: 1,
-      target: targetMatching('.mini-copyable'),
-    };
-    expect(shouldStartMiniWindowDrag(event, windowsTextOptions)).toBe(false);
-    expect(shouldToggleMiniWindow(event, windowsTextOptions)).toBe(false);
   });
 });

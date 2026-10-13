@@ -5,10 +5,10 @@
       class="lyrics-page"
       :class="{
         'no-lyric': noLyric,
-        'compact-expansion-exit': compactExpansionExit,
+        'compact-expansion-exit': compactExit !== null,
       }"
       :data-theme="theme"
-      :style="compactExpansionExitStyle"
+      :style="compactExitStyle"
     >
       <div
         v-if="
@@ -43,13 +43,14 @@
       <div
         v-if="isMini"
         class="mini-player"
-        :class="{ 'windows-no-text-selection': disableMiniTextSelection }"
+        :class="{ 'mini-text-locked': miniTextLocked }"
         @mouseenter="setWindowButtons(true)"
         @mouseleave="handleMiniMouseLeave"
         @mousedown="handleMiniMouseDown"
         @dblclick="handleMiniDoubleClick"
       >
         <img class="mini-cover" :src="miniImageUrl" />
+        <!-- Keep blank space draggable while allowing text selection. -->
         <div class="mini-info">
           <div class="mini-title" :title="currentTrack.name">
             <span class="mini-copyable">{{ currentTrack.name }}</span>
@@ -400,7 +401,7 @@
 </template>
 
 <script lang="ts">
-import { defineComponent } from 'vue';
+import { defineComponent, type PropType } from 'vue';
 // The lyrics page of Apple Music is so gorgeous, so I copy the design.
 // Some of the codes are from https://github.com/sl1673495/vue-netease-music
 
@@ -440,7 +441,7 @@ import {
 } from '@/services/desktopTransport';
 import { isDesktopRuntime, isTauriRuntime } from '@/utils/runtime';
 import { isWindows } from '@/utils/platform';
-import { resolveMiniModeDuringCompactExpansion } from '@/services/compactExpansionTransition';
+import type { CompactExpansionOrigin } from '@/services/compactWindow';
 import {
   calculateMiniSeekTime,
   getMiniProgressRiderStyle,
@@ -448,6 +449,7 @@ import {
 import {
   beginMiniWindowDragGesture,
   hasCrossedMiniWindowDragThreshold,
+  isBarWindowSize,
   shouldToggleMiniWindow,
 } from '@/utils/miniWindow';
 import { ARTWORK_SIZE, buildArtworkURL } from '@/utils/artwork';
@@ -498,17 +500,13 @@ function mergeLyrics(
 export default defineComponent({
   name: 'Lyrics',
   props: {
-    compactExpansionExit: {
-      type: Boolean,
-      default: false,
-    },
-    compactExpansionOrigin: {
-      type: String,
-      default: 'top',
-    },
-    compactExpansionHeight: {
-      type: Number,
-      default: 0,
+    // Set while the Windows compact bar fades out of a growing window.
+    compactExit: {
+      type: Object as PropType<{
+        origin: CompactExpansionOrigin;
+        height: number;
+      } | null>,
+      default: null,
     },
   },
   emits: {
@@ -547,27 +545,16 @@ export default defineComponent({
     };
   },
   computed: {
-    compactExpansionExitStyle(): Record<string, string> | undefined {
-      if (
-        !this.compactExpansionExit ||
-        !Number.isFinite(this.compactExpansionHeight) ||
-        this.compactExpansionHeight <= 0
-      ) {
-        return undefined;
-      }
-      return this.compactExpansionOrigin === 'bottom'
-        ? {
-            top: 'auto',
-            bottom: '0px',
-            height: `${this.compactExpansionHeight}px`,
-          }
-        : {
-            top: '0px',
-            bottom: 'auto',
-            height: `${this.compactExpansionHeight}px`,
-          };
+    // Pin the fading bar to the edge the window grows away from.
+    compactExitStyle() {
+      const exit = this.compactExit;
+      if (!exit) return undefined;
+      return exit.origin === 'bottom'
+        ? { top: 'auto', bottom: '0px', height: `${exit.height}px` }
+        : { top: '0px', bottom: 'auto', height: `${exit.height}px` };
     },
-    disableMiniTextSelection() {
+    // Windows mini text drags the window instead of selecting.
+    miniTextLocked() {
       return isWindows && isTauriRuntime;
     },
     ...mapState(useAppStore, ['player', 'settings', 'showLyrics', 'data']),
@@ -679,8 +666,8 @@ export default defineComponent({
     },
   },
   watch: {
-    compactExpansionExit(active: boolean) {
-      if (!active) this.checkMini();
+    compactExit(exit: unknown) {
+      if (!exit) this.checkMini();
     },
     currentTrack() {
       // Clear stale lyrics before updating the tray.
@@ -757,19 +744,14 @@ export default defineComponent({
     },
     // Switch below the compact layout breakpoint (short windows only).
     checkMini() {
-      const size = {
+      const next = isBarWindowSize({
         width: window.innerWidth,
         height: window.innerHeight,
-      };
-      const next = resolveMiniModeDuringCompactExpansion(
-        this.isMini,
-        this.compactExpansionExit,
-        size
-      );
+      });
       // Two lyric lines need at least 64px of height.
       this.miniTall = window.innerHeight >= 64;
-      if (this.compactExpansionExit) return;
-      if (next === this.isMini) return;
+      // Keep the bar layout while it fades out of the expanding window.
+      if (next === this.isMini || this.compactExit) return;
       this.isMini = next;
       this.pinDismissed = false;
       // Hide window controls in compact mode.
@@ -807,9 +789,7 @@ export default defineComponent({
     handleMiniMouseDown(event: MouseEvent) {
       // Clear text selection before handing the gesture to Tauri.
       if (
-        !beginMiniWindowDragGesture(event, window.getSelection(), {
-          allowTextDrag: this.disableMiniTextSelection,
-        }) ||
+        !beginMiniWindowDragGesture(event, window.getSelection()) ||
         !isTauriRuntime
       ) {
         return;
@@ -839,13 +819,7 @@ export default defineComponent({
       document.removeEventListener('mouseup', this.cancelMiniWindowDrag);
     },
     handleMiniDoubleClick(event: MouseEvent) {
-      if (
-        !shouldToggleMiniWindow(event, {
-          allowTextDrag: this.disableMiniTextSelection,
-        })
-      ) {
-        return;
-      }
+      if (!shouldToggleMiniWindow(event)) return;
       event.preventDefault();
       event.stopPropagation();
       this.$emit('expand-compact-window');
@@ -1192,10 +1166,9 @@ export default defineComponent({
     z-index: 2;
   }
 
-  &.windows-no-text-selection .mini-copyable {
-    -webkit-user-select: none;
+  &.mini-text-locked .mini-copyable {
     user-select: none;
-    cursor: default;
+    cursor: inherit;
   }
 
   // Shrink with the window height.
@@ -1815,29 +1788,21 @@ export default defineComponent({
   transform: translateY(100%);
 }
 
-.lyrics-page.compact-expansion-exit.slide-up-leave-active {
-  transition: opacity 180ms cubic-bezier(0.23, 1, 0.32, 1),
-    transform 180ms cubic-bezier(0.23, 1, 0.32, 1);
-}
-
-.lyrics-page.compact-expansion-exit.slide-up-leave-from {
-  opacity: 1;
-  transform: translateY(0);
-}
-
-.lyrics-page.compact-expansion-exit.slide-up-leave-to {
-  opacity: 0;
-  transform: translateY(10px);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .lyrics-page.compact-expansion-exit.slide-up-leave-active {
-    transition-duration: 0ms;
+.lyrics-page.compact-expansion-exit {
+  &.slide-up-leave-active {
+    transition: opacity 180ms cubic-bezier(0.23, 1, 0.32, 1),
+      transform 180ms cubic-bezier(0.23, 1, 0.32, 1);
   }
 
-  .lyrics-page.compact-expansion-exit.slide-up-leave-from,
-  .lyrics-page.compact-expansion-exit.slide-up-leave-to {
-    transform: none;
+  &.slide-up-leave-to {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    &.slide-up-leave-active {
+      transition-duration: 0ms;
+    }
   }
 }
 

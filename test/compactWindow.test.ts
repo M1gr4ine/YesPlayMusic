@@ -1,8 +1,9 @@
-import { expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import {
   buildCompactWindowTransitionFrame,
   COMPACT_RESIZE_SETTLE_MS,
+  fitCompactExpansionFrame,
   isCompactWindowPhysicalSize,
   loadCompactWindowMemory,
   rememberCompactWindowFrame,
@@ -177,4 +178,47 @@ test('Windows 和 Linux 从 mini bar 展开时先退出最大化且不记忆全�
     'if (!frame || !snapshot.normal) return null'
   );
   expect(compactWindow).toContain('await window.setFullscreen(false)');
+});
+
+describe('Windows compact expansion frame', () => {
+  const browse = { x: null, y: null, width: 920, height: 620 };
+  const area = (x: number, y: number, width: number, height: number) => ({
+    position: { x, y },
+    size: { width, height },
+  });
+  const bar = (x: number, y: number) => ({ x, y, width: 520, height: 80 });
+
+  test('grows down from a bar in the upper half', () => {
+    expect(
+      fitCompactExpansionFrame(bar(100, 120), browse, area(0, 0, 1920, 1040), 1)
+    ).toEqual({ x: 100, y: 120, width: 920, height: 620 });
+  });
+
+  test('grows up from a bar in the lower half, keeping its bottom edge', () => {
+    expect(
+      fitCompactExpansionFrame(bar(100, 900), browse, area(0, 0, 1920, 1040), 1)
+    ).toEqual({ x: 100, y: 360, width: 920, height: 620 });
+  });
+
+  test('handles negative monitor origins and physical DPI coordinates', () => {
+    expect(
+      fitCompactExpansionFrame(
+        bar(-500, 1300),
+        browse,
+        area(-2560, 40, 2560, 1400),
+        1.5
+      )
+    ).toEqual({ x: -1380, y: 490, width: 920, height: 620 });
+  });
+
+  test('shrinks an oversized browse frame into the work area', () => {
+    expect(
+      fitCompactExpansionFrame(
+        bar(800, 650),
+        { x: null, y: null, width: 1600, height: 1200 },
+        area(0, 0, 1280, 720),
+        1
+      )
+    ).toEqual({ x: 0, y: 0, width: 1280, height: 720 });
+  });
 });

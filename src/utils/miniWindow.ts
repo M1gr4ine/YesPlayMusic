@@ -1,5 +1,8 @@
-// Keep controls interactive even when Windows text is used for window dragging.
-const MINI_WINDOW_CONTROL_SELECTOR = [
+// Only these mini-player elements keep their native pointer behavior.
+// .mini-copyable wraps text tightly so only the text remains selectable;
+// a text-locked player (Windows) lets text drag and expand like blank space.
+export const MINI_WINDOW_INTERACTIVE_SELECTOR = [
+  '.mini-player:not(.mini-text-locked) .mini-copyable',
   '.mini-controls',
   '.mini-progress-track',
   'button',
@@ -9,13 +12,6 @@ const MINI_WINDOW_CONTROL_SELECTOR = [
   'select',
   '[contenteditable="true"]',
 ].join(', ');
-
-export const MINI_WINDOW_INTERACTIVE_SELECTOR =
-  '.mini-copyable, ' + MINI_WINDOW_CONTROL_SELECTOR;
-
-interface MiniWindowGestureOptions {
-  allowTextDrag?: boolean;
-}
 
 interface MiniWindowPointerEvent {
   button?: number;
@@ -47,23 +43,20 @@ function hasClosest(
 }
 
 export function isMiniWindowInteractiveTarget(
-  target: EventTarget | null | undefined,
-  options: MiniWindowGestureOptions = {}
+  target: EventTarget | null | undefined
 ): boolean {
-  const selector = options.allowTextDrag
-    ? MINI_WINDOW_CONTROL_SELECTOR
-    : MINI_WINDOW_INTERACTIVE_SELECTOR;
-  return hasClosest(target) ? target.closest(selector) !== null : false;
+  return hasClosest(target)
+    ? target.closest(MINI_WINDOW_INTERACTIVE_SELECTOR) !== null
+    : false;
 }
 
 export function shouldStartMiniWindowDrag(
-  event: MiniWindowPointerEvent,
-  options: MiniWindowGestureOptions = {}
+  event: MiniWindowPointerEvent
 ): boolean {
   return (
     event?.button === 0 &&
     event?.detail === 1 &&
-    !isMiniWindowInteractiveTarget(event.target, options)
+    !isMiniWindowInteractiveTarget(event.target)
   );
 }
 
@@ -71,10 +64,9 @@ export function shouldStartMiniWindowDrag(
 // existing selection explicitly because preventDefault also blocks that action.
 export function beginMiniWindowDragGesture(
   event: MiniWindowPointerEvent,
-  selection: Selection | null = null,
-  options: MiniWindowGestureOptions = {}
+  selection: Selection | null = null
 ): boolean {
-  if (!shouldStartMiniWindowDrag(event, options)) return false;
+  if (!shouldStartMiniWindowDrag(event)) return false;
   selection?.removeAllRanges?.();
   event.preventDefault?.();
   return true;
@@ -94,13 +86,8 @@ export function hasCrossedMiniWindowDragThreshold(
   );
 }
 
-export function shouldToggleMiniWindow(
-  event: MiniWindowPointerEvent,
-  options: MiniWindowGestureOptions = {}
-): boolean {
-  return (
-    event?.button === 0 && !isMiniWindowInteractiveTarget(event.target, options)
-  );
+export function shouldToggleMiniWindow(event: MiniWindowPointerEvent): boolean {
+  return event?.button === 0 && !isMiniWindowInteractiveTarget(event.target);
 }
 
 export function isMiniWindowSize(size: WindowSize | null | undefined): boolean {
