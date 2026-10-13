@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 
 const snapshotFixture = {
   artwork: 'https://example.test/cover.jpg',
@@ -74,6 +75,53 @@ test('taskbar overlay visual state rejects stale or malformed transition tokens'
   });
   expect(normalizeVisual?.({ phase: 'docked', token: -1 })).toBeNull();
   expect(normalizeVisual?.({ phase: 'unknown', token: 7 })).toBeNull();
+});
+
+test('taskbar overlay flight duration follows native and ignores bad values', async () => {
+  const { normalizeTaskbarOverlayVisual } = await import(
+    '../src/services/windowsTaskbar'
+  );
+
+  expect(
+    normalizeTaskbarOverlayVisual({
+      phase: 'snapping',
+      token: 3,
+      durationMs: 240,
+    })
+  ).toEqual({ phase: 'snapping', token: 3, durationMs: 240 });
+  for (const durationMs of [-1, Number.NaN, 2_001, '240']) {
+    expect(
+      normalizeTaskbarOverlayVisual({
+        phase: 'returning',
+        token: 3,
+        durationMs,
+      })
+    ).toEqual({ phase: 'returning', token: 3 });
+  }
+});
+
+test('drag dock hints accept only the three native states', async () => {
+  const { normalizeTaskbarDockHint } = await import(
+    '../src/services/windowsTaskbar'
+  );
+
+  for (const state of ['none', 'ready', 'unavailable'] as const) {
+    expect(normalizeTaskbarDockHint({ state })).toBe(state);
+  }
+  expect(normalizeTaskbarDockHint({ state: 'docked' })).toBeNull();
+  expect(normalizeTaskbarDockHint('ready')).toBeNull();
+  expect(normalizeTaskbarDockHint(null)).toBeNull();
+});
+
+test('the docked strip exposes no WebView2 caption drag region', () => {
+  // A caption hit on a taskbar child restyles it with a Win32 title bar.
+  const player = readFileSync(
+    new URL('../src/components/TaskbarPlayer.vue', import.meta.url),
+    'utf8'
+  );
+
+  expect(player).not.toMatch(/app-region:\s*drag/);
+  expect(player).not.toContain('data-tauri-drag-region');
 });
 
 test('taskbar overlay only applies newer visual tokens or a new phase', async () => {

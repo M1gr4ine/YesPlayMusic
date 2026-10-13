@@ -15,7 +15,7 @@
           ><svg-icon icon-class="arrow-right"
         /></button-icon>
         <button-icon
-          v-if="compactWindowExpanded"
+          v-if="showRestoreCompactButton"
           class="restore-compact-window"
           :title="$t('nav.restoreCompactPlayerTitle', { shortcut: 'Esc' })"
           @click="$emit('restore-compact-window')"
@@ -93,7 +93,7 @@ import { defineComponent } from 'vue';
 import { mapState } from 'pinia';
 import { useAppStore } from '@/stores/app';
 import { isLooseLoggedIn, doLogout } from '@/utils/auth';
-import { isDesktopRuntime } from '@/utils/runtime';
+import { isDesktopRuntime, isTauriRuntime } from '@/utils/runtime';
 
 // import icons for win32 title bar
 // icons by https://github.com/microsoft/vscode-codicons
@@ -103,7 +103,7 @@ import Win32Titlebar from '@/components/Win32Titlebar.vue';
 import LinuxTitlebar from '@/components/LinuxTitlebar.vue';
 import ContextMenu from '@/components/ContextMenu.vue';
 import ButtonIcon from '@/components/ButtonIcon.vue';
-import { platform } from '@/utils/platform';
+import { isWindows, platform } from '@/utils/platform';
 import { openExternalUrlSafely } from '@/services/externalLinks';
 import { resolveCustomTitlebar } from '@/services/titlebar';
 
@@ -162,6 +162,10 @@ export default defineComponent({
     },
     hasCustomTitlebar() {
       return this.enableWin32Titlebar || this.enableLinuxTitlebar;
+    },
+    // The Windows queue window returns to the bar with Esc only.
+    showRestoreCompactButton() {
+      return this.compactWindowExpanded && !(isWindows && isTauriRuntime);
     },
   },
   methods: {

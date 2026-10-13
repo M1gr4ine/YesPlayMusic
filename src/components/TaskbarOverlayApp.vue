@@ -1,18 +1,18 @@
 <template>
   <div
     class="taskbar-overlay-root"
-    :class="{ 'taskbar-reduced-motion': snapshot?.reducedMotion }"
+    :class="{
+      'taskbar-reduced-motion': snapshot?.reducedMotion,
+      'is-flying': flying,
+    }"
     :data-phase="visual.phase"
     :data-visual-token="visual.token"
+    :style="{ '--flight-duration': `${flightDurationMs}ms` }"
   >
-    <div
-      v-if="visual.phase === 'snapping' || visual.phase === 'returning'"
-      class="taskbar-transition-ghost"
-      aria-hidden="true"
-    />
+    <div class="taskbar-flight-backdrop" aria-hidden="true" />
     <TaskbarPlayer
-      v-if="visual.phase === 'docked' && playerProps"
-      :key="visual.token"
+      v-if="visual.phase !== 'hidden' && playerProps"
+      class="taskbar-overlay-player"
       v-bind="playerProps"
       @previous="invokeCommand({ action: 'previous' })"
       @play="invokeCommand({ action: 'play' })"
@@ -26,6 +26,7 @@
       @seek-pointercancel="commitSeek"
       @nudge-seek="nudgeSeek"
     />
+    <div class="taskbar-flight-outline" aria-hidden="true" />
   </div>
 </template>
 
@@ -64,6 +65,14 @@ const visual = shallowRef<TaskbarOverlayVisual>({
 });
 const seekPreview = ref<number | null>(null);
 const { locale } = useI18n({ useScope: 'global' });
+
+const DEFAULT_FLIGHT_DURATION_MS = 240;
+const flying = computed(
+  () => visual.value.phase === 'snapping' || visual.value.phase === 'returning'
+);
+const flightDurationMs = computed(
+  () => visual.value.durationMs ?? DEFAULT_FLIGHT_DURATION_MS
+);
 
 const playerProps = computed(() => {
   const current = snapshot.value;
@@ -252,25 +261,86 @@ onBeforeUnmount(() => {
   background: transparent;
 }
 
-.taskbar-transition-ghost {
+/* The flying strip keeps the floating player's glass and glow, then lands
+   transparent so only the strip remains on the taskbar. */
+.taskbar-flight-backdrop {
   position: absolute;
-  z-index: 1;
+  z-index: 0;
   inset: 0;
-  border: 1px solid rgba(255, 255, 255, 0.9);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3);
-  opacity: 1;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: linear-gradient(
+    135deg,
+    rgba(37, 37, 37, 0.94),
+    rgba(22, 22, 22, 0.96)
+  );
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  opacity: 0;
   pointer-events: none;
 }
 
-.taskbar-reduced-motion[data-phase='snapping'] .taskbar-transition-ghost {
-  animation: taskbar-outline-fade-in 120ms ease-out both;
+.taskbar-overlay-player {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
 }
 
-.taskbar-reduced-motion[data-phase='returning'] .taskbar-transition-ghost {
-  animation: taskbar-outline-fade-out 120ms ease-in both;
+.taskbar-flight-outline {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3),
+    inset 0 0 14px rgba(255, 255, 255, 0.18);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 180ms ease-out;
 }
 
-@keyframes taskbar-outline-fade-in {
+.is-flying .taskbar-flight-outline {
+  opacity: 1;
+  transition: none;
+}
+
+.is-flying .taskbar-overlay-player {
+  pointer-events: none;
+}
+
+[data-phase='snapping'] .taskbar-flight-backdrop {
+  animation: taskbar-glass-out var(--flight-duration)
+    cubic-bezier(0.77, 0, 0.175, 1) both;
+}
+
+[data-phase='returning'] .taskbar-flight-backdrop {
+  animation: taskbar-glass-in var(--flight-duration)
+    cubic-bezier(0.77, 0, 0.175, 1) both;
+}
+
+/* Reduced motion has no geometric travel: the strip simply fades. */
+.taskbar-reduced-motion .taskbar-flight-backdrop {
+  animation: none;
+}
+
+.taskbar-reduced-motion[data-phase='snapping'] .taskbar-overlay-player,
+.taskbar-reduced-motion[data-phase='snapping'] .taskbar-flight-outline {
+  animation: taskbar-fade-in var(--flight-duration) ease-out both;
+}
+
+.taskbar-reduced-motion[data-phase='returning'] .taskbar-overlay-player,
+.taskbar-reduced-motion[data-phase='returning'] .taskbar-flight-outline {
+  animation: taskbar-fade-out var(--flight-duration) ease-in both;
+}
+
+@keyframes taskbar-glass-out {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes taskbar-glass-in {
   from {
     opacity: 0;
   }
@@ -280,7 +350,17 @@ onBeforeUnmount(() => {
   }
 }
 
-@keyframes taskbar-outline-fade-out {
+@keyframes taskbar-fade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes taskbar-fade-out {
   from {
     opacity: 1;
   }

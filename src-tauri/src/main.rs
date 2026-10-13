@@ -1893,6 +1893,7 @@ fn renderer_ready(window: WebviewWindow) -> Result<bool, String> {
     if window.label() != "main" {
         return Err("renderer_ready is restricted to the main window".to_string());
     }
+    println!("[tauri] renderer-ready: main");
     show_pending_startup_window(window.app_handle())
 }
 
@@ -2651,11 +2652,14 @@ fn create_main_window(
         match event {
             WindowEvent::Resized(_) => {
                 #[cfg(target_os = "windows")]
-                if window_for_events.is_minimized().unwrap_or(false) {
-                    if let Some(controller) =
-                        app.try_state::<taskbar_docking::TaskbarDockController>()
-                    {
+                if let Some(controller) = app.try_state::<taskbar_docking::TaskbarDockController>()
+                {
+                    if window_for_events.is_minimized().unwrap_or(false) {
                         controller.request_hide();
+                    } else {
+                        // Shrinking into the compact bar near the taskbar
+                        // offers the same release-to-dock as dragging it there.
+                        controller.note_window_move(&window_for_events);
                     }
                 }
                 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -2861,6 +2865,9 @@ fn main() {
                 | tauri_plugin_window_state::StateFlags::FULLSCREEN,
         )
         .skip_initial_state("main")
+        // The taskbar overlay's visibility and style belong to the docking
+        // controller; a restored tao state would restyle a taskbar child.
+        .with_denylist(&["taskbar-lyrics"])
         .build();
     #[cfg(not(target_os = "windows"))]
     let window_state_plugin = tauri_plugin_window_state::Builder::default()

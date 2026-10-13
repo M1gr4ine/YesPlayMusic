@@ -6,6 +6,19 @@ pub struct Rect {
     pub height: i32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ForegroundContext {
+    pub hwnd: u64,
+    pub bounds: Rect,
+}
+
+pub fn foreground_context_changed(
+    previous: Option<ForegroundContext>,
+    current: Option<ForegroundContext>,
+) -> bool {
+    !matches!((previous, current), (Some(previous), Some(current)) if previous == current)
+}
+
 pub fn taskbar_snap_ease(progress: f64) -> f64 {
     let progress = progress.clamp(0.0, 1.0);
     let axis = |t: f64, first: f64, second: f64| {
@@ -220,6 +233,51 @@ pub fn near_taskbar(bounds: Rect, taskbar: Rect, tolerance: i32) -> bool {
         && bounds_bottom >= i64::from(taskbar.y) - i64::from(tolerance)
 }
 
+/// Distance above or below a taskbar, in DIPs, that still offers docking.
+pub const SNAP_TOLERANCE_DIP: u64 = 40;
+
+pub fn snap_tolerance(dpi: u32) -> i32 {
+    let dpi = u64::from(dpi.clamp(48, 768));
+    i32::try_from((SNAP_TOLERANCE_DIP * dpi).div_ceil(96)).unwrap_or(40)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DragDockHint {
+    None,
+    Ready,
+    Unavailable,
+}
+
+impl DragDockHint {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Ready => "ready",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Feedback for a compact player being dragged near `taskbar`. `safe` means
+/// the taskbar is visible and its monitor has no fullscreen foreground app.
+pub fn drag_dock_hint(
+    bounds: Rect,
+    taskbar: Rect,
+    free: Option<Rect>,
+    dpi: u32,
+    safe: bool,
+) -> DragDockHint {
+    let horizontal = taskbar.width >= taskbar.height;
+    if !horizontal || !near_taskbar(bounds, taskbar, snap_tolerance(dpi)) {
+        return DragDockHint::None;
+    }
+    if safe && free.and_then(|free| dock_target(free, dpi)).is_some() {
+        DragDockHint::Ready
+    } else {
+        DragDockHint::Unavailable
+    }
+}
+
 pub fn should_persist_frame(compact: bool, docked: bool, transitioning: bool) -> bool {
     !compact && !docked && !transitioning
 }
@@ -227,10 +285,178 @@ pub fn should_persist_frame(compact: bool, docked: bool, transitioning: bool) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_mode_is_valid, dock_decision, dock_target, interpolate_rect,
-        live_compact_mode_is_valid, near_taskbar, should_persist_frame, taskbar_snap_ease,
-        validate_overlay_action, validate_overlay_snapshot, DockMode, ForegroundSafety, Rect,
+        compact_mode_is_valid, dock_decision, dock_target, drag_dock_hint,
+        foreground_context_changed, interpolate_rect, live_compact_mode_is_valid, near_taskbar,
+        should_persist_frame, snap_tolerance, taskbar_snap_ease, validate_overlay_action,
+        validate_overlay_snapshot, DockMode, DragDockHint, ForegroundContext, ForegroundSafety,
+        Rect,
     };
+
+    const BOTTOM_TASKBAR: Rect = Rect {
+        x: 0,
+        y: 1040,
+        width: 1920,
+        height: 40,
+    };
+    const WIDE_FREE_BAND: Rect = Rect {
+        x: 800,
+        y: 1040,
+        width: 700,
+        height: 40,
+    };
+
+    fn compact_player_with_bottom(bottom: i32) -> Rect {
+        Rect {
+            x: 820,
+            y: bottom - 60,
+            width: 593,
+            height: 60,
+        }
+    }
+
+    #[test]
+    fn foreground_context_changes_require_a_fresh_full_safety_probe() {
+        let before = ForegroundContext {
+            hwnd: 0x1234,
+            bounds: Rect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        };
+        let different_window = ForegroundContext {
+            hwnd: 0x5678,
+            ..before
+        };
+        let changed_bounds = ForegroundContext {
+            bounds: Rect {
+                width: 1918,
+                ..before.bounds
+            },
+            ..before
+        };
+
+        assert!(!foreground_context_changed(Some(before), Some(before)));
+        assert!(foreground_context_changed(
+            Some(before),
+            Some(different_window)
+        ));
+        assert!(foreground_context_changed(
+            Some(before),
+            Some(changed_bounds)
+        ));
+        assert!(foreground_context_changed(Some(before), None));
+        assert!(foreground_context_changed(None, Some(before)));
+        assert!(foreground_context_changed(None, None));
+    }
+
+    #[test]
+    fn snap_tolerance_scales_forty_dips_with_the_taskbar_dpi() {
+        assert_eq!(snap_tolerance(96), 40);
+        assert_eq!(snap_tolerance(144), 60);
+        assert_eq!(snap_tolerance(120), 50);
+        assert_eq!(snap_tolerance(0), snap_tolerance(48));
+    }
+
+    #[test]
+    fn dragging_within_the_snap_band_offers_docking_when_space_is_free() {
+        for bottom in [1000, 1040, 1080] {
+            assert_eq!(
+                drag_dock_hint(
+                    compact_player_with_bottom(bottom),
+                    BOTTOM_TASKBAR,
+                    Some(WIDE_FREE_BAND),
+                    96,
+                    true
+                ),
+                DragDockHint::Ready,
+                "bottom edge at {bottom}"
+            );
+        }
+        assert_eq!(
+            drag_dock_hint(
+                compact_player_with_bottom(999),
+                BOTTOM_TASKBAR,
+                Some(WIDE_FREE_BAND),
+                96,
+                true
+            ),
+            DragDockHint::None
+        );
+    }
+
+    #[test]
+    fn high_dpi_taskbars_keep_the_same_logical_snap_band() {
+        let taskbar = Rect {
+            x: 0,
+            y: 1380,
+            width: 2560,
+            height: 60,
+        };
+        let free = Rect {
+            x: 1000,
+            y: 1380,
+            width: 900,
+            height: 60,
+        };
+        let player = |bottom: i32| Rect {
+            x: 1200,
+            y: bottom - 90,
+            width: 890,
+            height: 90,
+        };
+        assert_eq!(
+            drag_dock_hint(player(1321), taskbar, Some(free), 144, true),
+            DragDockHint::Ready
+        );
+        assert_eq!(
+            drag_dock_hint(player(1319), taskbar, Some(free), 144, true),
+            DragDockHint::None
+        );
+    }
+
+    #[test]
+    fn near_but_undockable_taskbars_explain_instead_of_offering_a_snap() {
+        let player = compact_player_with_bottom(1030);
+        let narrow = Rect {
+            width: 379,
+            ..WIDE_FREE_BAND
+        };
+        for (free, safe) in [
+            (Some(narrow), true),
+            (None, true),
+            (Some(WIDE_FREE_BAND), false),
+        ] {
+            assert_eq!(
+                drag_dock_hint(player, BOTTOM_TASKBAR, free, 96, safe),
+                DragDockHint::Unavailable
+            );
+        }
+    }
+
+    #[test]
+    fn vertical_taskbars_never_offer_the_horizontal_strip() {
+        let vertical = Rect {
+            x: 0,
+            y: 0,
+            width: 62,
+            height: 1080,
+        };
+        let player = Rect {
+            x: 40,
+            y: 500,
+            width: 593,
+            height: 60,
+        };
+        assert_eq!(
+            drag_dock_hint(player, vertical, Some(WIDE_FREE_BAND), 96, true),
+            DragDockHint::None
+        );
+        assert_eq!(DragDockHint::Ready.as_str(), "ready");
+        assert_eq!(DragDockHint::Unavailable.as_str(), "unavailable");
+        assert_eq!(DragDockHint::None.as_str(), "none");
+    }
 
     #[test]
     fn fullscreen_hides_compact_window_and_retains_enabled_dock_intent_for_resume() {

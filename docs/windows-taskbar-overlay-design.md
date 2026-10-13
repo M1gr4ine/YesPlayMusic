@@ -18,11 +18,13 @@ The user reported that reparenting the real compact player sometimes exposes nat
 Dock status modes: floating, docking, docked, undocking, waiting. Existing status fields remain mode/suspended/dockError/enabled.
 
 Native commands:
+
 - `publish_taskbar_overlay_snapshot({snapshot})`: main-only, bounded validated presentation DTO.
 - `taskbar_overlay_ready()`: overlay-only; returns `{snapshot, visual}` and marks the actual overlay renderer ready.
 - `taskbar_overlay_action({action,value?})`: overlay-only; previous/play/next/shuffle/seek relay to main; undock and close are handled by the controller.
 
 Events:
+
 - `desktop://taskbarOverlaySnapshot`: presentation DTO sent only to overlay.
 - `desktop://taskbarOverlayVisual`: `{phase:hidden|snapping|docked|returning,token}`; generation prevents stale completion.
 - `desktop://taskbarOverlayAction`: validated playback actions sent only to main.
@@ -35,3 +37,25 @@ Events:
 4. Build a protocol runtime and verify both HWNDs independently: main parent/style/frame invariants throughout every animation, exact overlay taskbar geometry, button-to-player delivery, true hidden playback progress, rapid reversal, fullscreen, helper death and reopen.
 5. Integrate into the three-feature branch, preserve QQ and compact expansion, back up and replace the installed local portable build, and verify the desktop shortcut still starts it.
 6. Push the reviewed taskbar branch and update existing PR #38 and its final description; create no additional PR and merge no upstream PR.
+
+## Docking feedback and recovery
+
+Dragging or shrinking the compact player near a horizontal taskbar publishes a
+bounded docking hint. A ready hint shows a 2px white outline at the visible
+window edge, with no inset or independent rounded frame. Only its highlight
+texture rotates, over eight seconds; idle state has no animation, and reduced
+motion keeps the static white outline. The mask fixes all four edge widths.
+
+Forward and reverse overlay flights follow the native window geometry. A
+foreground window change requires a fresh fullscreen/taskbar probe before a
+visual layer can be shown; failed or unreadable probes retain hidden recovery
+intent. The return path rechecks safety before restoring the compact player.
+
+WebView2 taskbar-child surfaces use non-draggable app regions. The window-state
+plugin excludes the overlay so persisted visibility cannot restore a cached
+caption style, and the helper redraws an exposed caption residue beneath a
+restyled child.
+
+Renderer HTML documents are served with no-store and ignore conditional
+validators. This prevents a stale index from referencing removed hashed assets
+after switching builds; hashed assets retain conditional cache validation.

@@ -3,6 +3,8 @@ export default {
     closeWindow: '关闭窗口',
     loadingLyrics: '正在载入歌词',
     floatMiniPlayer: '恢复为悬浮播放器',
+    releaseToDock: '松开吸附到任务栏',
+    dockSpaceUnavailable: '任务栏空间不足',
     play: '播放',
     songs: '首歌',
   },

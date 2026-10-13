@@ -389,8 +389,10 @@ button:disabled {
   content: '';
 }
 
+/* The strip is a child of Explorer's taskbar. WebView2 treats app-region drag
+   as a caption hit on that child, so no surface may be draggable. */
 .drag-region {
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
 }
 
 .no-drag {
@@ -467,7 +469,7 @@ button:disabled {
   align-items: center;
   column-gap: 14px;
   padding: 0 22px 2px 0;
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
 }
 
 .track-panel {
@@ -485,7 +487,7 @@ button:disabled {
   border-radius: 14px 10px 0 0;
   background: #242424;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
 }
 
 .artwork,
@@ -514,7 +516,7 @@ button:disabled {
   min-width: 0;
   margin-top: -34px;
   padding-left: 5px;
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
 }
 
 .track-title,

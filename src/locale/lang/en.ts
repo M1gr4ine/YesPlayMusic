@@ -3,6 +3,8 @@ export default {
     closeWindow: 'Close window',
     loadingLyrics: 'Loading lyrics',
     floatMiniPlayer: 'Return mini player to floating mode',
+    releaseToDock: 'Release to dock to the taskbar',
+    dockSpaceUnavailable: 'Not enough taskbar space',
     play: 'PLAY',
     songs: 'Songs',
   },

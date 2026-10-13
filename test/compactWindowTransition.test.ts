@@ -38,6 +38,12 @@ const nativeWindow = {
   setFullscreen: async () => undefined,
 };
 
+mock.module('@/utils/platform', () => ({
+  platform: 'win32',
+  isWindows: true,
+  isMac: false,
+  isLinux: false,
+}));
 mock.module('@/utils/runtime', () => ({ isTauriRuntime: true }));
 mock.module('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => nativeWindow,

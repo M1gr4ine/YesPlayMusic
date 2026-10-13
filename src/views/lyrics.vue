@@ -39,6 +39,7 @@
       <div
         v-if="isMini"
         class="mini-player"
+        :class="{ 'taskbar-snap-ready': taskbarDockHint === 'ready' }"
         @mouseenter="setWindowButtons(true)"
         @mouseleave="handleMiniMouseLeave"
         @mousedown="handleMiniMouseDown"
@@ -126,6 +127,19 @@
             }"
             :style="miniProgressRiderStyle"
           ></span>
+        </div>
+        <div v-if="taskbarDockingAvailable" class="mini-dock-glow"></div>
+        <div
+          v-if="taskbarDockHint !== 'none'"
+          class="mini-dock-hint"
+          :class="{ unavailable: taskbarDockHint === 'unavailable' }"
+          role="status"
+        >
+          {{
+            taskbarDockHint === 'ready'
+              ? $t('common.releaseToDock')
+              : $t('common.dockSpaceUnavailable')
+          }}
         </div>
       </div>
 
@@ -439,6 +453,7 @@ import {
   clampTaskbarOverlaySeek,
   DEFAULT_TASKBAR_DOCK_STATE,
   isTaskbarDockingAvailable,
+  listenTaskbarDockHint,
   listenTaskbarOverlayActions,
   listenTaskbarDockState,
   publishTaskbarOverlaySnapshot,
@@ -446,6 +461,7 @@ import {
   syncTaskbarCompactModeWithReadiness,
 } from '@/services/windowsTaskbar';
 import type {
+  TaskbarDockHint,
   TaskbarDockState,
   TaskbarOverlayAction,
   TaskbarOverlaySnapshot,
@@ -548,6 +564,9 @@ export default defineComponent({
       taskbarOverlayPublishTimer: null as ReturnType<typeof setTimeout> | null,
       taskbarOverlayMotionCleanup: null as (() => void) | null,
       taskbarOverlayReducedMotion: false,
+      taskbarDockHint: 'none' as TaskbarDockHint,
+      taskbarDockHintCleanup: null as (() => void) | null,
+      taskbarDockHintGeneration: 0,
       isAlwaysOnTop: false,
       pinDismissed: false,
       miniSeekDragging: false,
@@ -715,6 +734,7 @@ export default defineComponent({
     if (isTaskbarDockingAvailable()) {
       void this.initializeTaskbarOverlayActions();
       void this.initializeTaskbarDocking();
+      void this.initializeTaskbarDockHint();
       this.initializeTaskbarOverlayMotionPreference();
     }
     this.getLyric();
@@ -749,6 +769,9 @@ export default defineComponent({
     this.taskbarOverlayActionsCleanup = null;
     this.taskbarOverlayMotionCleanup?.();
     this.taskbarOverlayMotionCleanup = null;
+    this.taskbarDockHintGeneration += 1;
+    this.taskbarDockHintCleanup?.();
+    this.taskbarDockHintCleanup = null;
     if (this.taskbarOverlayPublishTimer !== null) {
       clearTimeout(this.taskbarOverlayPublishTimer);
       this.taskbarOverlayPublishTimer = null;
@@ -835,6 +858,21 @@ export default defineComponent({
         if (generation === this.taskbarOverlayActionsGeneration) {
           this.taskbarOverlayActionsInitializationInFlight = false;
         }
+      }
+    },
+    async initializeTaskbarDockHint() {
+      const generation = ++this.taskbarDockHintGeneration;
+      try {
+        const cleanup = await listenTaskbarDockHint(hint => {
+          this.taskbarDockHint = hint;
+        });
+        if (generation !== this.taskbarDockHintGeneration) {
+          cleanup();
+          return;
+        }
+        this.taskbarDockHintCleanup = cleanup;
+      } catch (error) {
+        console.warn('[taskbar-dock] hint listener failed', error);
       }
     },
     handleTaskbarOverlayAction(action: TaskbarOverlayAction) {
@@ -1383,6 +1421,16 @@ export default defineComponent({
 </script>
 
 <style lang="scss" scoped>
+@keyframes mini-dock-flow {
+  from {
+    transform: translate(-50%, -50%) rotate(0deg);
+  }
+
+  to {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
+}
+
 // Compact player
 .mini-player {
   position: absolute;
@@ -1524,6 +1572,97 @@ export default defineComponent({
     &:hover,
     &.active {
       opacity: 1;
+    }
+  }
+
+  // Taskbar docking feedback while the bar is dragged near the taskbar.
+  .mini-dock-glow {
+    position: absolute;
+    // Follow the compact window edge without a separate inset rounded frame.
+    inset: 0;
+    z-index: 3;
+    box-sizing: border-box;
+    padding: 2px;
+    border-radius: inherit;
+    overflow: hidden;
+    container-type: size;
+    pointer-events: none;
+    opacity: 0;
+    background: rgba(255, 255, 255, 0.26);
+    -webkit-mask: linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    mask-composite: exclude;
+    transition: opacity 160ms cubic-bezier(0.23, 1, 0.32, 1);
+
+    &::before {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      // Width + height covers the diagonal with less waste on a long bar.
+      width: calc(100cqw + 100cqh + 8px);
+      aspect-ratio: 1;
+      background: conic-gradient(
+        from 0deg,
+        rgba(255, 255, 255, 0) 0deg,
+        rgba(255, 255, 255, 0.08) 35deg,
+        rgba(255, 255, 255, 0.72) 65deg,
+        rgba(255, 255, 255, 0.2) 78deg,
+        rgba(255, 255, 255, 0) 95deg,
+        rgba(255, 255, 255, 0) 180deg,
+        rgba(255, 255, 255, 0.06) 215deg,
+        rgba(255, 255, 255, 0.62) 245deg,
+        rgba(255, 255, 255, 0.16) 258deg,
+        rgba(255, 255, 255, 0) 275deg,
+        rgba(255, 255, 255, 0) 360deg
+      );
+      transform: translate(-50%, -50%);
+    }
+  }
+
+  &.taskbar-snap-ready .mini-dock-glow {
+    opacity: 1;
+
+    &::before {
+      animation: mini-dock-flow 8s linear infinite;
+      will-change: transform;
+    }
+  }
+
+  .mini-dock-hint {
+    position: absolute;
+    top: 4px;
+    left: 50%;
+    z-index: 4;
+    padding: 2px 8px;
+    border-radius: 8px;
+    background: #3b3b3b;
+    color: #eee;
+    font-size: 10px;
+    line-height: 14px;
+    white-space: nowrap;
+    pointer-events: none;
+    transform: translateX(-50%);
+
+    &.unavailable {
+      color: rgba(238, 238, 238, 0.72);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .mini-dock-glow {
+      transition-duration: 0ms;
+
+      &::before {
+        opacity: 0;
+      }
+    }
+
+    &.taskbar-snap-ready .mini-dock-glow::before {
+      animation: none;
+      will-change: auto;
     }
   }
 

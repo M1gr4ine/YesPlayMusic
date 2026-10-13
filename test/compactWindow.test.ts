@@ -101,6 +101,13 @@ test('中窗提供明确返回按钮和 Escape 快捷键', () => {
   expect(app).toContain('this.restoreCompactWindow()');
 });
 
+test('Windows 队列窗只保留 Esc 返回，不显示返回按钮', () => {
+  expect(navbar).toContain('v-if="showRestoreCompactButton"');
+  expect(navbar).toContain(
+    'this.compactWindowExpanded && !(isWindows && isTauriRuntime)'
+  );
+});
+
 test('重启时恢复最后使用的逻辑尺寸，不采用 Tauri 插件保存的物理像素', () => {
   const storage = createMemoryStorage();
 

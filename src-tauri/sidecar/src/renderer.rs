@@ -136,7 +136,14 @@ pub async fn apply_security_headers(request: Request<Body>, next: Next) -> Respo
     response
 }
 
-pub async fn serve_renderer(renderer_dir: PathBuf, request: Request<Body>) -> Response<Body> {
+pub async fn serve_renderer(renderer_dir: PathBuf, mut request: Request<Body>) -> Response<Body> {
+    let path = percent_encoding::percent_decode_str(request.uri().path()).decode_utf8_lossy();
+    let is_document = path.ends_with('/') || path.to_ascii_lowercase().ends_with(".html");
+    if is_document {
+        // A rollback must not reuse a cached index from a newer build.
+        request.headers_mut().remove(header::IF_MODIFIED_SINCE);
+        request.headers_mut().remove(header::IF_NONE_MATCH);
+    }
     let service = ServiceBuilder::new()
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
@@ -144,7 +151,14 @@ pub async fn serve_renderer(renderer_dir: PathBuf, request: Request<Body>) -> Re
         ))
         .service(ServeDir::new(renderer_dir).append_index_html_on_directories(true));
     match service.oneshot(request).await {
-        Ok(response) => response.map(Body::new),
+        Ok(mut response) => {
+            if is_document {
+                response
+                    .headers_mut()
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            }
+            response.map(Body::new)
+        }
         Err(error) => {
             tracing::warn!("renderer service failed: {error}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -173,6 +187,104 @@ mod tests {
     use tokio::{io::AsyncWriteExt, net::TcpListener, process::Command};
 
     use super::*;
+
+    #[tokio::test]
+    async fn renderer_documents_do_not_reuse_a_newer_builds_cached_index() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("index.html"),
+            r#"<script src="old-build.js"></script>"#,
+        )
+        .unwrap();
+        std::fs::create_dir(directory.path().join("nested")).unwrap();
+        std::fs::write(
+            directory.path().join("nested/index.html"),
+            "nested current index",
+        )
+        .unwrap();
+        for method in [Method::GET, Method::HEAD] {
+            for path in ["/", "/index.html?build=old", "/%69ndex%2Ehtml", "/nested/"] {
+                for validators in [0, 1, 2] {
+                    let mut request = Request::builder().method(method.clone()).uri(path);
+                    if validators != 1 {
+                        request = request
+                            .header(header::IF_MODIFIED_SINCE, "Fri, 01 Jan 2100 00:00:00 GMT");
+                    }
+                    if validators != 0 {
+                        request = request.header(header::IF_NONE_MATCH, "*");
+                    }
+                    let response = serve_renderer(
+                        directory.path().to_path_buf(),
+                        request.body(Body::empty()).unwrap(),
+                    )
+                    .await;
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::OK,
+                        "{method} {path}, validators={validators}"
+                    );
+                    let body = to_bytes(response.into_body(), 1024).await.unwrap();
+                    if method == Method::HEAD {
+                        assert!(body.is_empty());
+                    } else if path == "/nested/" {
+                        assert_eq!(body, "nested current index");
+                    } else {
+                        assert_eq!(body, r#"<script src="old-build.js"></script>"#);
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn renderer_index_is_not_stored_between_builds() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("index.html"), "current index").unwrap();
+        for path in ["/", "/index.html", "/%69ndex%2Ehtml"] {
+            let response = serve_renderer(
+                directory.path().to_path_buf(),
+                Request::builder().uri(path).body(Body::empty()).unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
+    }
+
+    #[tokio::test]
+    async fn renderer_hashed_assets_still_support_revalidation() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("assets")).unwrap();
+        std::fs::write(
+            directory.path().join("assets/index-abc123.js"),
+            "current chunk",
+        )
+        .unwrap();
+        let response = serve_renderer(
+            directory.path().to_path_buf(),
+            Request::builder()
+                .uri("/assets/index-abc123.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "public, max-age=0"
+        );
+        let modified = response.headers()[header::LAST_MODIFIED].clone();
+        let response = serve_renderer(
+            directory.path().to_path_buf(),
+            Request::builder()
+                .uri("/assets/index-abc123.js")
+                .header(header::IF_MODIFIED_SINCE, modified)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    }
 
     #[derive(Clone)]
     struct CaptureState(Arc<tokio::sync::Mutex<Option<String>>>);

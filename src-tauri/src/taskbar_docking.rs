@@ -1,4 +1,4 @@
-use super::taskbar_docking_model::{self as model, DockMode, ForegroundSafety, Rect};
+use super::taskbar_docking_model::{self as model, DockMode, DragDockHint, ForegroundSafety, Rect};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -20,14 +20,15 @@ const EVENT: &str = "desktop://taskbarDockState";
 const OVERLAY_SNAPSHOT_EVENT: &str = "desktop://taskbarOverlaySnapshot";
 const OVERLAY_VISUAL_EVENT: &str = "desktop://taskbarOverlayVisual";
 const OVERLAY_ACTION_EVENT: &str = "desktop://taskbarOverlayAction";
+const HINT_EVENT: &str = "desktop://taskbarDockHint";
 const OVERLAY_LABEL: &str = "taskbar-lyrics";
 const PREF_FILE: &str = "taskbar-docking.json";
 const PREF_MAX_BYTES: u64 = 4_096;
 const HELPER_TIMEOUT: Duration = Duration::from_secs(3);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
-const MOVE_DEBOUNCE: Duration = Duration::from_millis(350);
-const NEAR_TASKBAR_PIXELS: i32 = 28;
-const ANIMATION_SAFETY_INTERVAL: Duration = Duration::from_millis(40);
+const DRAG_SAMPLE_INTERVAL: Duration = Duration::from_millis(16);
+const DRAG_PROBE_INTERVAL: Duration = Duration::from_millis(600);
+const VISUAL_READY_TIMEOUT: Duration = Duration::from_secs(2);
 const FULL_MOTION_DURATION: Duration = Duration::from_millis(240);
 const REDUCED_MOTION_DURATION: Duration = Duration::from_millis(120);
 
@@ -42,9 +43,25 @@ struct Win32Rect {
 }
 
 #[cfg(target_os = "windows")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Win32Point {
+    x: i32,
+    y: i32,
+}
+
+#[cfg(target_os = "windows")]
 #[link(name = "user32")]
 unsafe extern "system" {
+    fn GetForegroundWindow() -> *mut std::ffi::c_void;
+    fn GetWindowRect(hwnd: *mut std::ffi::c_void, rect: *mut Win32Rect) -> i32;
     fn GetClientRect(hwnd: *mut std::ffi::c_void, rect: *mut Win32Rect) -> i32;
+    fn ClientToScreen(hwnd: *mut std::ffi::c_void, point: *mut Win32Point) -> i32;
+    fn GetDpiForWindow(hwnd: *mut std::ffi::c_void) -> u32;
+    fn IsZoomed(hwnd: *mut std::ffi::c_void) -> i32;
+    fn IsIconic(hwnd: *mut std::ffi::c_void) -> i32;
+    fn GetAsyncKeyState(key: i32) -> i16;
+    fn GetSystemMetrics(index: i32) -> i32;
     fn ShowWindow(hwnd: *mut std::ffi::c_void, command: i32) -> i32;
     fn SetWindowPos(
         hwnd: *mut std::ffi::c_void,
@@ -55,6 +72,12 @@ unsafe extern "system" {
         height: i32,
         flags: u32,
     ) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "dwmapi")]
+unsafe extern "system" {
+    fn DwmFlush() -> i32;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -102,7 +125,8 @@ pub struct TaskbarDockController {
     overlay_reset_complete: Arc<AtomicBool>,
     visual_ready_token: Arc<AtomicU64>,
     current_visual_token: Arc<AtomicU64>,
-    latest_move: Arc<Mutex<Option<Instant>>>,
+    main_hwnd: Arc<AtomicU64>,
+    drag_active: Arc<AtomicBool>,
 }
 
 struct Inner {
@@ -119,7 +143,6 @@ struct Inner {
     mode: DockMode,
     suspended: bool,
     dock_error: String,
-    pending_move: Option<Instant>,
     published_intermediate_status: bool,
     overlay_snapshot: Option<Value>,
     visual_phase: &'static str,
@@ -152,11 +175,10 @@ struct OverlayVisual {
     duration_ms: u32,
 }
 
-struct OverlayAnimation {
+struct OverlayFlight {
     from: NativeRect,
     to: NativeRect,
     phase: &'static str,
-    bar_handle: String,
 }
 
 impl From<NativeRect> for Rect {
@@ -185,6 +207,34 @@ impl From<Rect> for NativeRect {
 struct ProbeResult {
     complete: bool,
     bars: Vec<TaskbarObservation>,
+}
+
+struct DragProbe {
+    complete: bool,
+    bars: Vec<TaskbarObservation>,
+    overlay_ready: bool,
+}
+
+impl DragProbe {
+    fn hint(&self, bounds: NativeRect) -> DragDockHint {
+        let Some(bar) = bar_for_window(&self.bars, bounds) else {
+            return DragDockHint::None;
+        };
+        let safe = self.complete && !bar.suspended && bar.fullscreen == Some(false);
+        let hint = model::drag_dock_hint(
+            bounds.into(),
+            bar.taskbar.into(),
+            bar.free.map(Into::into),
+            bar.dpi,
+            safe,
+        );
+        // Without a rendered strip a release could only fall back; say nothing.
+        if hint == DragDockHint::Ready && !self.overlay_ready {
+            DragDockHint::None
+        } else {
+            hint
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -256,7 +306,6 @@ impl TaskbarDockController {
                 mode: DockMode::Floating,
                 suspended: false,
                 dock_error: String::new(),
-                pending_move: None,
                 published_intermediate_status: false,
                 overlay_snapshot: None,
                 visual_phase: "hidden",
@@ -276,13 +325,18 @@ impl TaskbarDockController {
             overlay_reset_complete: Arc::new(AtomicBool::new(true)),
             visual_ready_token: Arc::new(AtomicU64::new(0)),
             current_visual_token: Arc::new(AtomicU64::new(0)),
-            latest_move: Arc::new(Mutex::new(None)),
+            main_hwnd: Arc::new(AtomicU64::new(0)),
+            drag_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn bind_and_start(&self, main: WebviewWindow, overlay: WebviewWindow) {
         if main.label() != "main" || overlay.label() != OVERLAY_LABEL {
             return;
+        }
+        // Drag sampling reads the player HWND directly from worker threads.
+        if let Ok(hwnd) = native_hwnd(&main) {
+            self.main_hwnd.store(hwnd, Ordering::Release);
         }
         if let Ok(mut inner) = self.inner.lock() {
             inner.hwnd = native_hwnd(&overlay).ok();
@@ -336,7 +390,7 @@ impl TaskbarDockController {
                     inner.enabled = true;
                     self.compact_docking_active
                         .store(inner.compact, Ordering::Release);
-                    self.refresh_locked(&mut inner, window, &overlay, false)
+                    self.refresh_locked(&mut inner, window, &overlay)
                 }
                 Err(error) => Err(error),
             }
@@ -344,7 +398,6 @@ impl TaskbarDockController {
             match persist_preference(&self.app, false) {
                 Ok(()) => {
                     inner.enabled = false;
-                    self.clear_pending_movement(&mut inner);
                     match self.return_to_main_locked(&mut inner, window, &overlay) {
                         Ok(()) => Ok(()),
                         Err(error) => {
@@ -409,7 +462,6 @@ impl TaskbarDockController {
                     inner.mode = DockMode::Floating;
                     inner.suspended = false;
                     inner.dock_error.clear();
-                    self.clear_pending_movement(&mut inner);
                     self.set_visual_phase(&mut inner, "hidden", None, None);
                 })
         } else {
@@ -417,7 +469,7 @@ impl TaskbarDockController {
             self.compact_docking_active
                 .store(inner.enabled, Ordering::Release);
             if inner.enabled {
-                self.refresh_locked(&mut inner, window, &overlay, false)
+                self.refresh_locked(&mut inner, window, &overlay)
             } else {
                 inner.mode = DockMode::Floating;
                 inner.suspended = false;
@@ -527,21 +579,151 @@ impl TaskbarDockController {
         }
     }
 
+    /// Called from the main window's move and resize events. Only a pointer
+    /// gesture starts a drag session; programmatic or keyboard moves never dock.
     pub fn note_window_move(&self, window: &WebviewWindow) {
-        if window.label() != "main" || self.compact_docking_active.load(Ordering::Acquire) {
+        if window.label() != "main"
+            || self.drag_active.load(Ordering::Acquire)
+            || self.compact_docking_active.load(Ordering::Acquire)
+            || self.stopping.load(Ordering::Acquire)
+            || self.exit_in_progress.load(Ordering::Acquire)
+        {
             return;
         }
-        let Ok((_, height)) = logical_inner_size(window) else {
+        let hwnd = self.main_hwnd.load(Ordering::Acquire);
+        if hwnd == 0 || !primary_button_pressed() || !native_floating_compact(hwnd) {
+            return;
+        }
+        if self
+            .drag_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let controller = self.clone();
+        thread::spawn(move || {
+            controller.watch_drag(hwnd);
+            controller.drag_active.store(false, Ordering::Release);
+        });
+    }
+
+    fn watch_drag(&self, main_hwnd: u64) {
+        let mut probe: Option<(Instant, DragProbe)> = None;
+        let mut hint = DragDockHint::None;
+        loop {
+            if self.stopping.load(Ordering::Acquire)
+                || self.exit_in_progress.load(Ordering::Acquire)
+                || self.compact_docking_active.load(Ordering::Acquire)
+            {
+                break;
+            }
+            // Sample the button first so a release during the probe still uses
+            // the final window position.
+            let released = !primary_button_pressed();
+            if probe
+                .as_ref()
+                .is_none_or(|(sampled, _)| sampled.elapsed() >= DRAG_PROBE_INTERVAL)
+            {
+                probe = self.probe_for_drag().map(|sample| (Instant::now(), sample));
+            }
+            let next = match (probe.as_ref(), native_client_screen_rect(main_hwnd)) {
+                (Some((_, sample)), Some(bounds)) if native_floating_compact(main_hwnd) => {
+                    sample.hint(bounds)
+                }
+                _ => DragDockHint::None,
+            };
+            if next != hint {
+                self.emit_drag_hint(next);
+                hint = next;
+            }
+            if released {
+                if hint == DragDockHint::Ready {
+                    self.dock_after_release();
+                }
+                break;
+            }
+            thread::sleep(DRAG_SAMPLE_INTERVAL);
+        }
+        if hint != DragDockHint::None {
+            self.emit_drag_hint(DragDockHint::None);
+        }
+    }
+
+    fn probe_for_drag(&self) -> Option<DragProbe> {
+        let mut inner = self.inner.lock().ok()?;
+        if inner.attached || inner.transitioning || !inner.compact {
+            return None;
+        }
+        let hwnd = inner.hwnd?;
+        let value = inner
+            .native
+            .request(&self.app, hwnd, "probe", json!({}))
+            .ok()?;
+        let probe: ProbeResult = serde_json::from_value(value).ok()?;
+        Some(DragProbe {
+            complete: probe.complete,
+            bars: probe.bars,
+            overlay_ready: self.overlay_ready.load(Ordering::Acquire)
+                && inner.overlay_snapshot.is_some(),
+        })
+    }
+
+    fn emit_drag_hint(&self, hint: DragDockHint) {
+        if let Err(error) = self
+            .app
+            .emit_to("main", HINT_EVENT, json!({ "state": hint.as_str() }))
+        {
+            eprintln!("[taskbar-docking] failed to publish the drag hint: {error}");
+        }
+    }
+
+    fn dock_after_release(&self) {
+        let Some(main) = self.app.get_webview_window("main") else {
             return;
         };
-        if height >= 340 {
+        let Ok(overlay) = self.overlay_window() else {
+            return;
+        };
+        let Ok(mut inner) = self.lock() else {
+            return;
+        };
+        if inner.enabled || inner.attached || !inner.compact {
             return;
         }
-        // Keep the last drag event even while the worker waits on native IPC.
-        // This mutex is never held during native calls or window mutations.
-        if let Ok(mut moved) = self.latest_move.lock() {
-            *moved = Some(Instant::now());
+        if let Err(error) = persist_preference(&self.app, true) {
+            eprintln!("[taskbar-docking] could not save the docking preference: {error}");
+            return;
         }
+        inner.enabled = true;
+        self.compact_docking_active.store(true, Ordering::Release);
+        inner.transitioning = true;
+        let result = self.refresh_locked(&mut inner, &main, &overlay);
+        inner.transitioning = false;
+        if !inner.attached {
+            // A release that could not dock leaves an ordinary floating player
+            // instead of a pending intent that would snap later.
+            if let Err(error) = &result {
+                eprintln!("[taskbar-docking] release did not dock: {error}");
+            }
+            if self
+                .return_to_main_locked(&mut inner, &main, &overlay)
+                .is_ok()
+            {
+                inner.enabled = false;
+                if let Err(error) = persist_preference(&self.app, false) {
+                    eprintln!("[taskbar-docking] could not clear the docking preference: {error}");
+                }
+                inner.mode = DockMode::Floating;
+                inner.suspended = false;
+                inner.dock_error.clear();
+            }
+        }
+        self.compact_docking_active
+            .store(inner.enabled && inner.compact, Ordering::Release);
+        let current = status(&inner);
+        drop(inner);
+        self.emit(current);
     }
 
     pub fn should_persist_main_frame(&self, window: &WebviewWindow) -> bool {
@@ -630,13 +812,6 @@ impl TaskbarDockController {
         }
     }
 
-    fn clear_pending_movement(&self, inner: &mut Inner) {
-        inner.pending_move = None;
-        if let Ok(mut moved) = self.latest_move.lock() {
-            *moved = None;
-        }
-    }
-
     fn tick(&self, main: &WebviewWindow, overlay: &WebviewWindow) {
         if main.label() != "main" || overlay.label() != OVERLAY_LABEL {
             return;
@@ -645,15 +820,8 @@ impl TaskbarDockController {
             return;
         };
         inner.requested_visible = self.requested_visible.load(Ordering::Acquire);
-        if let Ok(mut moved) = self.latest_move.lock() {
-            if let Some(latest) = moved.take() {
-                if !inner.attached && !inner.transitioning {
-                    inner.pending_move = Some(latest);
-                }
-            }
-        }
         let old = status(&inner);
-        let _ = self.refresh_locked(&mut inner, main, overlay, true);
+        let _ = self.refresh_locked(&mut inner, main, overlay);
         let current = status(&inner);
         let publish =
             should_publish_refreshed_status(&old, &current, inner.published_intermediate_status);
@@ -668,7 +836,6 @@ impl TaskbarDockController {
         inner: &mut Inner,
         main: &WebviewWindow,
         overlay: &WebviewWindow,
-        allow_auto_snap: bool,
     ) -> Result<(), String> {
         inner.published_intermediate_status = false;
         let window = main;
@@ -755,41 +922,7 @@ impl TaskbarDockController {
             }
         }
 
-        let requires_live_compact =
-            inner.compact && (inner.enabled || inner.pending_move.is_some());
-        let initial_live_compact = if requires_live_compact {
-            match window_is_live_compact(window) {
-                Ok(eligible) => eligible,
-                Err(error) => {
-                    if inner.enabled {
-                        fail_closed(inner, main, overlay, "The main window state is unavailable");
-                    }
-                    return Err(error);
-                }
-            }
-        } else {
-            false
-        };
-        if inner.compact && inner.enabled && !initial_live_compact {
-            if inner.suspended {
-                self.ensure_transition_safety(inner, main, overlay, None)?;
-            }
-            self.detach_for_compact_guard(inner, main, overlay)?;
-            inner.pending_move = None;
-            inner.mode = DockMode::Floating;
-            inner.suspended = false;
-            inner.dock_error.clear();
-            self.show_regular_requested(main);
-            hide_overlay_window(overlay);
-            return Ok(());
-        }
-        let auto_snap_due = allow_auto_snap
-            && inner.compact
-            && initial_live_compact
-            && inner
-                .pending_move
-                .is_some_and(|moved| moved.elapsed() >= MOVE_DEBOUNCE);
-        if !inner.compact || (!inner.enabled && !auto_snap_due) {
+        if !inner.compact || !inner.enabled {
             if inner.attached || inner.recovery_frame.is_some() {
                 self.detach_locked(inner, overlay)?;
             }
@@ -800,7 +933,27 @@ impl TaskbarDockController {
             hide_overlay_window(overlay);
             return Ok(());
         }
+        let initial_live_compact = match window_is_live_compact(window) {
+            Ok(eligible) => eligible,
+            Err(error) => {
+                fail_closed(inner, main, overlay, "The main window state is unavailable");
+                return Err(error);
+            }
+        };
+        if !initial_live_compact {
+            if inner.suspended {
+                self.ensure_transition_safety(inner, main, overlay, None)?;
+            }
+            self.detach_for_compact_guard(inner, main, overlay)?;
+            inner.mode = DockMode::Floating;
+            inner.suspended = false;
+            inner.dock_error.clear();
+            self.show_regular_requested(main);
+            hide_overlay_window(overlay);
+            return Ok(());
+        }
 
+        let foreground_before_probe = foreground_context();
         let probe_value = match inner
             .native
             .request(&self.app, current_hwnd, "probe", json!({}))
@@ -808,13 +961,6 @@ impl TaskbarDockController {
             Ok(value) => value,
             Err(error) => {
                 self.recover_helper(inner, main, current_hwnd, &error);
-                if !inner.enabled {
-                    inner.pending_move = None;
-                    inner.mode = DockMode::Floating;
-                    inner.suspended = false;
-                    inner.dock_error.clear();
-                    return Ok(());
-                }
                 fail_closed(
                     inner,
                     main,
@@ -827,13 +973,6 @@ impl TaskbarDockController {
         let probe: ProbeResult = match serde_json::from_value(probe_value) {
             Ok(probe) => probe,
             Err(_) => {
-                if !inner.enabled {
-                    inner.pending_move = None;
-                    inner.mode = DockMode::Floating;
-                    inner.suspended = false;
-                    inner.dock_error.clear();
-                    return Ok(());
-                }
                 fail_closed(
                     inner,
                     main,
@@ -844,26 +983,25 @@ impl TaskbarDockController {
             }
         };
         if !probe.complete {
-            if !inner.enabled {
-                inner.pending_move = None;
-                inner.mode = DockMode::Floating;
-                inner.suspended = false;
-                inner.dock_error.clear();
-                return Ok(());
-            }
             fail_closed(inner, main, overlay, "Taskbar detection is incomplete");
             return Ok(());
+        }
+        let mut foreground_checkpoint = foreground_before_probe;
+        let foreground_after_probe = foreground_context();
+        if model::foreground_context_changed(foreground_checkpoint, foreground_after_probe) {
+            self.ensure_transition_safety_if_foreground_changed(
+                inner,
+                main,
+                overlay,
+                None,
+                &mut foreground_checkpoint,
+            )?;
+        } else {
+            foreground_checkpoint = foreground_after_probe;
         }
         let bounds = match window_rect(window) {
             Ok(bounds) => bounds,
             Err(error) => {
-                if !inner.enabled {
-                    inner.pending_move = None;
-                    inner.mode = DockMode::Floating;
-                    inner.suspended = false;
-                    inner.dock_error.clear();
-                    return Ok(());
-                }
                 fail_closed(
                     inner,
                     main,
@@ -874,13 +1012,6 @@ impl TaskbarDockController {
             }
         };
         let Some(bar) = bar_for_window(&probe.bars, bounds) else {
-            if !inner.enabled {
-                inner.pending_move = None;
-                inner.mode = DockMode::Floating;
-                inner.suspended = false;
-                inner.dock_error.clear();
-                return Ok(());
-            }
             fail_closed(
                 inner,
                 main,
@@ -909,7 +1040,6 @@ impl TaskbarDockController {
             return Ok(());
         }
         if safety != ForegroundSafety::Clear {
-            inner.pending_move = None;
             inner.mode = DockMode::Floating;
             inner.suspended = false;
             inner.dock_error.clear();
@@ -917,53 +1047,21 @@ impl TaskbarDockController {
         }
 
         // The UI compact flag can lag native resizing, maximizing, or entering
-        // fullscreen. Recheck the actual HWND immediately before allowing a
-        // dock or auto-snap transition.
+        // fullscreen. Recheck the actual HWND immediately before docking.
         let live_compact = match window_is_live_compact(window) {
             Ok(eligible) => eligible,
             Err(error) => {
-                if inner.enabled {
-                    fail_closed(inner, main, overlay, "The main window state is unavailable");
-                }
+                fail_closed(inner, main, overlay, "The main window state is unavailable");
                 return Err(error);
             }
         };
         if !live_compact {
             self.detach_for_compact_guard(inner, main, overlay)?;
-            inner.pending_move = None;
             inner.mode = DockMode::Floating;
             inner.suspended = false;
             inner.dock_error.clear();
             self.show_regular_requested(main);
             hide_overlay_window(overlay);
-            return Ok(());
-        }
-
-        if allow_auto_snap && auto_snap_due {
-            inner.pending_move = None;
-            if !inner.enabled
-                && inner.compact
-                && model::near_taskbar(bounds.into(), bar.taskbar.into(), NEAR_TASKBAR_PIXELS)
-            {
-                let target_available = bar
-                    .free
-                    .map(|free| model::dock_target(free.into(), bar.dpi).is_some())
-                    .unwrap_or(false);
-                if target_available {
-                    if persist_preference(&self.app, true).is_ok() {
-                        inner.enabled = true;
-                        self.compact_docking_active.store(true, Ordering::Release);
-                    } else {
-                        inner.dock_error = "Could not save the taskbar preference".to_string();
-                    }
-                }
-            }
-        }
-
-        if !inner.enabled {
-            inner.mode = DockMode::Floating;
-            inner.suspended = false;
-            inner.dock_error.clear();
             return Ok(());
         }
 
@@ -1011,6 +1109,18 @@ impl TaskbarDockController {
             return Ok(());
         }
 
+        if !inner.attached && primary_button_pressed() {
+            // A move or resize loop still owns the pointer. Native operations
+            // queued behind that loop would land after attachment; dock after
+            // the release instead.
+            inner.mode = DockMode::Waiting;
+            inner.suspended = false;
+            inner.dock_error.clear();
+            hide_overlay_window(overlay);
+            self.show_regular_requested(main);
+            return Ok(());
+        }
+
         let was_suspended = inner.suspended;
         if !inner.attached {
             // Capture the overlay's actual floating frame before its visual
@@ -1025,18 +1135,24 @@ impl TaskbarDockController {
             }
             inner.mode = DockMode::Docking;
             if self.requested_visible.load(Ordering::Acquire) {
-                let from = window_rect(main)?;
-                if !self.animate_overlay(
-                    inner,
-                    main,
-                    overlay,
-                    OverlayAnimation {
-                        from,
-                        to: target.into(),
-                        phase: "snapping",
-                        bar_handle: bar.handle.clone(),
-                    },
-                )? {
+                let flight = OverlayFlight {
+                    from: client_screen_rect(main)?,
+                    to: target.into(),
+                    phase: "snapping",
+                };
+                set_native_window_rect(current_hwnd, flight.from, false)?;
+                let flown = match self.prepare_overlay_visual(inner, overlay, &flight) {
+                    Some(_) => self.run_overlay_flight(
+                        inner,
+                        main,
+                        overlay,
+                        &flight,
+                        Some(&bar.handle),
+                        &mut foreground_checkpoint,
+                    )?,
+                    None => false,
+                };
+                if !flown {
                     inner.mode = DockMode::Waiting;
                     inner.suspended = false;
                     hide_overlay_window(overlay);
@@ -1050,7 +1166,6 @@ impl TaskbarDockController {
         match self.attach_locked(inner, main, overlay, current_hwnd, bar) {
             Ok(true) => {}
             Ok(false) => {
-                inner.pending_move = None;
                 inner.mode = DockMode::Floating;
                 inner.suspended = false;
                 inner.dock_error.clear();
@@ -1080,11 +1195,15 @@ impl TaskbarDockController {
                 return Err(error);
             }
         }
-        self.ensure_transition_safety(inner, main, overlay, Some(&bar.handle))?;
+        // Hand the landed flight to the docked strip before the slower
+        // foreground probe; an unsafe result hides it again.
         inner.mode = DockMode::Docked;
         inner.suspended = false;
         inner.dock_error.clear();
-        self.set_visual_phase(inner, "docked", None, None);
+        if inner.visual_phase != "docked" {
+            self.set_visual_phase(inner, "docked", None, None);
+        }
+        self.ensure_transition_safety(inner, main, overlay, Some(&bar.handle))?;
         if was_suspended || inner.requested_visible {
             if let Err(error) = self.show_requested_locked(inner, overlay, current_hwnd) {
                 self.recover_helper(inner, main, current_hwnd, &error);
@@ -1321,7 +1440,7 @@ impl TaskbarDockController {
         {
             inner.native.request(&self.app, hwnd, "show", json!({}))?;
             if !self.requested_visible.load(Ordering::Acquire) {
-                hide_taskbar_window(window);
+                hide_overlay_window(window);
             }
         }
         Ok(())
@@ -1339,9 +1458,9 @@ impl TaskbarDockController {
         }
     }
 
-    fn hide_if_not_requested_visible(&self, window: &WebviewWindow) {
+    fn hide_if_not_requested_visible(&self, overlay: &WebviewWindow) {
         if !self.requested_visible.load(Ordering::Acquire) {
-            hide_taskbar_window(window);
+            hide_overlay_window(overlay);
         }
     }
 
@@ -1478,28 +1597,171 @@ impl TaskbarDockController {
         Ok(())
     }
 
-    fn animate_overlay(
+    fn ensure_transition_safety_if_foreground_changed(
         &self,
         inner: &mut Inner,
         main: &WebviewWindow,
         overlay: &WebviewWindow,
-        animation: OverlayAnimation,
-    ) -> Result<bool, String> {
-        let OverlayAnimation {
-            from,
-            to,
-            phase,
-            bar_handle,
-        } = animation;
-        if !from.into_rect().is_valid() || !to.into_rect().is_valid() {
-            return Err("overlay animation geometry is invalid".to_string());
+        selected_bar: Option<&str>,
+        checkpoint: &mut Option<model::ForegroundContext>,
+    ) -> Result<(), String> {
+        let mut before = foreground_context();
+        if before.is_none() {
+            fail_closed(
+                inner,
+                main,
+                overlay,
+                "Foreground context is unavailable during transition",
+            );
+            self.set_visual_phase(inner, "hidden", None, None);
+            return Err("foreground context is unavailable during transition".to_string());
         }
-        let hwnd = native_hwnd(overlay)?;
-        set_native_window_rect(hwnd, from, false)?;
-        self.set_visual_phase(inner, phase, Some(from), Some(to));
+        if !model::foreground_context_changed(*checkpoint, before) {
+            return Ok(());
+        }
+
+        // A complete taskbar probe can take long enough for the foreground to
+        // change again. Repeat once when its HWND/rect changed during the
+        // probe; if it keeps moving, leave both windows hidden and let the
+        // normal poller retry after the transition settles.
+        for _ in 0..2 {
+            self.ensure_transition_safety(inner, main, overlay, selected_bar)?;
+            let after = foreground_context();
+            if after.is_none() {
+                fail_closed(
+                    inner,
+                    main,
+                    overlay,
+                    "Foreground context became unavailable during transition",
+                );
+                self.set_visual_phase(inner, "hidden", None, None);
+                return Err("foreground context became unavailable during transition".to_string());
+            }
+            if before == after {
+                *checkpoint = after;
+                return Ok(());
+            }
+            before = Some(after.expect("foreground context checked above"));
+        }
+
+        fail_closed(
+            inner,
+            main,
+            overlay,
+            "Foreground changed while safety was being verified",
+        );
+        self.set_visual_phase(inner, "hidden", None, None);
+        Err("foreground changed during transition safety verification".to_string())
+    }
+
+    fn recheck_flight_safety_if_foreground_changed(
+        &self,
+        inner: &mut Inner,
+        main: &WebviewWindow,
+        overlay: &WebviewWindow,
+        selected_bar: Option<&str>,
+        checkpoint: &mut Option<model::ForegroundContext>,
+        overlay_visible: bool,
+    ) -> Result<(), String> {
         let token = inner.visual_token;
-        let ready_deadline = Instant::now() + Duration::from_secs(2);
-        let mut next_safety_probe = Instant::now();
+        if !model::foreground_context_changed(*checkpoint, foreground_context()) {
+            return Ok(());
+        }
+        if overlay_visible {
+            hide_overlay_window(overlay);
+        }
+        self.ensure_transition_safety_if_foreground_changed(
+            inner,
+            main,
+            overlay,
+            selected_bar,
+            checkpoint,
+        )?;
+        if overlay_visible
+            && self.requested_visible.load(Ordering::Acquire)
+            && self.current_visual_token.load(Ordering::Acquire) == token
+        {
+            if let Ok(hwnd) = native_hwnd(overlay) {
+                show_overlay_on_top(hwnd);
+            }
+        }
+        Ok(())
+    }
+
+    /// Publishes a flight phase and waits until the overlay has painted it,
+    /// so the window is never revealed with stale content.
+    fn prepare_overlay_visual(
+        &self,
+        inner: &mut Inner,
+        overlay: &WebviewWindow,
+        flight: &OverlayFlight,
+    ) -> Option<u64> {
+        if !flight.from.into_rect().is_valid() || !flight.to.into_rect().is_valid() {
+            return None;
+        }
+        self.set_visual_phase(inner, flight.phase, Some(flight.from), Some(flight.to));
+        let token = inner.visual_token;
+        let deadline = Instant::now() + VISUAL_READY_TIMEOUT;
+        loop {
+            if !self.requested_visible.load(Ordering::Acquire)
+                || self.current_visual_token.load(Ordering::Acquire) != token
+            {
+                hide_overlay_window(overlay);
+                self.set_visual_phase(inner, "hidden", None, None);
+                return None;
+            }
+            if self.visual_ready_token.load(Ordering::Acquire) == token {
+                return Some(token);
+            }
+            if Instant::now() >= deadline {
+                self.set_visual_phase(inner, "hidden", None, None);
+                return None;
+            }
+            thread::sleep(Duration::from_millis(4));
+        }
+    }
+
+    /// Moves the prepared overlay between the player and the taskbar. The
+    /// loop samples the foreground HWND and rect, running the full taskbar
+    /// safety probe only when that lightweight context changes.
+    fn run_overlay_flight(
+        &self,
+        inner: &mut Inner,
+        main: &WebviewWindow,
+        overlay: &WebviewWindow,
+        flight: &OverlayFlight,
+        selected_bar: Option<&str>,
+        foreground_checkpoint: &mut Option<model::ForegroundContext>,
+    ) -> Result<bool, String> {
+        let token = inner.visual_token;
+        let hwnd = native_hwnd(overlay)?;
+        set_native_window_rect(hwnd, flight.from, false)?;
+        self.recheck_flight_safety_if_foreground_changed(
+            inner,
+            main,
+            overlay,
+            selected_bar,
+            foreground_checkpoint,
+            false,
+        )?;
+        if !self.requested_visible.load(Ordering::Acquire)
+            || self.current_visual_token.load(Ordering::Acquire) != token
+        {
+            hide_overlay_window(overlay);
+            self.set_visual_phase(inner, "hidden", None, None);
+            return Ok(false);
+        }
+        // Cover the player before hiding it so no frame shows neither window.
+        show_overlay_on_top(hwnd);
+        if flight.phase == "snapping" {
+            hide_main_window(main);
+        }
+        let duration = overlay_animation_duration(inner.overlay_snapshot.as_ref());
+        let reduced = duration == REDUCED_MOTION_DURATION;
+        if reduced {
+            set_native_window_rect(hwnd, flight.to, false)?;
+        }
+        let start = Instant::now();
         loop {
             if !self.requested_visible.load(Ordering::Acquire)
                 || self.current_visual_token.load(Ordering::Acquire) != token
@@ -1508,61 +1770,14 @@ impl TaskbarDockController {
                 self.set_visual_phase(inner, "hidden", None, None);
                 return Ok(false);
             }
-            let now = Instant::now();
-            if now >= next_safety_probe {
-                self.ensure_transition_safety(inner, main, overlay, Some(&bar_handle))?;
-                next_safety_probe = Instant::now() + ANIMATION_SAFETY_INTERVAL;
-            }
-            if self.visual_ready_token.load(Ordering::Acquire) == token {
-                break;
-            }
-            if now >= ready_deadline {
-                self.set_visual_phase(inner, "hidden", None, None);
-                return Ok(false);
-            }
-            thread::sleep(Duration::from_millis(8));
-        }
-        self.ensure_transition_safety(inner, main, overlay, Some(&bar_handle))?;
-        if !self.requested_visible.load(Ordering::Acquire) {
-            self.set_visual_phase(inner, "hidden", None, None);
-            return Ok(false);
-        }
-        hide_main_window(main);
-        if let Err(error) = overlay.show() {
-            fail_closed(
+            self.recheck_flight_safety_if_foreground_changed(
                 inner,
                 main,
                 overlay,
-                "The overlay could not be shown safely",
-            );
-            self.set_visual_phase(inner, "hidden", None, None);
-            return Err(error.to_string());
-        }
-        show_native_window_no_activate(hwnd);
-
-        let duration = overlay_animation_duration(inner.overlay_snapshot.as_ref());
-        if duration == REDUCED_MOTION_DURATION {
-            set_native_window_rect(hwnd, to, false)?;
-            let fade_started = Instant::now();
-            while fade_started.elapsed() < REDUCED_MOTION_DURATION {
-                if !self.requested_visible.load(Ordering::Acquire)
-                    || self.current_visual_token.load(Ordering::Acquire) != token
-                {
-                    hide_overlay_window(overlay);
-                    self.set_visual_phase(inner, "hidden", None, None);
-                    return Ok(false);
-                }
-                if Instant::now() >= next_safety_probe {
-                    self.ensure_transition_safety(inner, main, overlay, Some(&bar_handle))?;
-                    next_safety_probe = Instant::now() + ANIMATION_SAFETY_INTERVAL;
-                }
-                thread::sleep(Duration::from_millis(8));
-            }
-            self.ensure_transition_safety(inner, main, overlay, Some(&bar_handle))?;
-            return Ok(true);
-        }
-        let start = Instant::now();
-        while start.elapsed() < FULL_MOTION_DURATION {
+                selected_bar,
+                foreground_checkpoint,
+                true,
+            )?;
             if !self.requested_visible.load(Ordering::Acquire)
                 || self.current_visual_token.load(Ordering::Acquire) != token
             {
@@ -1570,20 +1785,41 @@ impl TaskbarDockController {
                 self.set_visual_phase(inner, "hidden", None, None);
                 return Ok(false);
             }
-            if Instant::now() >= next_safety_probe {
-                self.ensure_transition_safety(inner, main, overlay, Some(&bar_handle))?;
-                next_safety_probe = Instant::now() + ANIMATION_SAFETY_INTERVAL;
+            let progress = (start.elapsed().as_secs_f64() / duration.as_secs_f64()).min(1.0);
+            if !reduced {
+                if let Some(rect) =
+                    model::interpolate_rect(flight.from.into(), flight.to.into(), progress)
+                {
+                    set_native_window_rect(hwnd, rect.into(), false)?;
+                }
             }
-            let progress =
-                (start.elapsed().as_secs_f64() / FULL_MOTION_DURATION.as_secs_f64()).min(1.0);
-            if let Some(rect) = model::interpolate_rect(from.into(), to.into(), progress) {
-                set_native_window_rect(hwnd, rect.into(), false)?;
+            if progress >= 1.0 {
+                if flight.phase == "returning" {
+                    // Hide before the final full probe so a newly foregrounded
+                    // game is never covered while the safety check runs.
+                    hide_overlay_window(overlay);
+                    // This is the final full verification before the caller
+                    // reveals the main window.
+                    *foreground_checkpoint = None;
+                    self.ensure_transition_safety_if_foreground_changed(
+                        inner,
+                        main,
+                        overlay,
+                        selected_bar,
+                        foreground_checkpoint,
+                    )?;
+                }
+                if !self.requested_visible.load(Ordering::Acquire)
+                    || self.current_visual_token.load(Ordering::Acquire) != token
+                {
+                    hide_overlay_window(overlay);
+                    self.set_visual_phase(inner, "hidden", None, None);
+                    return Ok(false);
+                }
+                return Ok(true);
             }
-            thread::sleep(Duration::from_millis(8));
+            wait_for_next_frame();
         }
-        set_native_window_rect(hwnd, to, false)?;
-        self.ensure_transition_safety(inner, main, overlay, Some(&bar_handle))?;
-        Ok(true)
     }
 
     fn return_to_main_locked(
@@ -1594,7 +1830,11 @@ impl TaskbarDockController {
     ) -> Result<(), String> {
         let requested = self.requested_visible.load(Ordering::Acquire);
         let selected_bar = inner.attached_bar.clone();
-        let start = if inner.attached && requested && self.overlay_ready.load(Ordering::Acquire) {
+        let docked_rect = if inner.attached
+            && requested
+            && selected_bar.is_some()
+            && self.overlay_ready.load(Ordering::Acquire)
+        {
             let hwnd = inner
                 .hwnd
                 .or_else(|| native_hwnd(overlay).ok())
@@ -1605,60 +1845,70 @@ impl TaskbarDockController {
                 .map_err(|error| format_native_error(&error))
                 .and_then(|value| parse_recovery_frame(value, hwnd))
                 .ok()
-                .and_then(|frame| {
-                    selected_bar
-                        .clone()
-                        .map(|bar_handle| (frame.rect, bar_handle))
-                })
+                .map(|frame| frame.rect)
         } else {
             None
         };
-        hide_overlay_window(overlay);
-        self.detach_locked(inner, overlay)?;
-        let Some(from) = start else {
-            hide_overlay_window(overlay);
-            if self.requested_visible.load(Ordering::Acquire) {
-                self.ensure_transition_safety(inner, main, overlay, selected_bar.as_deref())?;
-                show_main_inactive(main);
-            } else {
-                hide_main_window(main);
-            }
-            self.set_visual_phase(inner, "hidden", None, None);
-            return Ok(());
-        };
-        let (from, bar_handle) = from;
-        let hwnd = native_hwnd(overlay)?;
-        let to = window_rect(main)?;
-        set_native_window_rect(hwnd, from, false)?;
-        inner.mode = DockMode::Undocking;
-        if !self.animate_overlay(
-            inner,
-            main,
-            overlay,
-            OverlayAnimation {
+        let flight = match (docked_rect, client_screen_rect(main)) {
+            (Some(from), Ok(to)) => Some(OverlayFlight {
                 from,
                 to,
                 phase: "returning",
-                bar_handle: bar_handle.clone(),
-            },
-        )? {
-            hide_overlay_window(overlay);
-            if self.requested_visible.load(Ordering::Acquire) {
-                self.ensure_transition_safety(inner, main, overlay, Some(&bar_handle))?;
-                show_main_inactive(main);
-            } else {
-                hide_main_window(main);
-            }
-            self.set_visual_phase(inner, "hidden", None, None);
-            return Ok(());
-        }
+            }),
+            _ => None,
+        };
+        // Switch the strip to its flight look while it is still in the
+        // taskbar; leaving Explorer then costs a single frame.
+        let token = flight
+            .as_ref()
+            .and_then(|flight| self.prepare_overlay_visual(inner, overlay, flight));
         hide_overlay_window(overlay);
+        self.detach_locked(inner, overlay)?;
+        let mut foreground_checkpoint = None;
         if self.requested_visible.load(Ordering::Acquire) {
-            self.ensure_transition_safety(inner, main, overlay, Some(&bar_handle))?;
+            self.ensure_transition_safety_if_foreground_changed(
+                inner,
+                main,
+                overlay,
+                selected_bar.as_deref(),
+                &mut foreground_checkpoint,
+            )?;
+        }
+        let mut final_flight_verified = false;
+        if let (Some(flight), Some(_)) = (flight.as_ref(), token) {
+            inner.mode = DockMode::Undocking;
+            final_flight_verified = self.run_overlay_flight(
+                inner,
+                main,
+                overlay,
+                flight,
+                selected_bar.as_deref(),
+                &mut foreground_checkpoint,
+            )?;
+        }
+        // Reveal the player before removing the flight so no frame is empty.
+        if self.requested_visible.load(Ordering::Acquire) {
+            if !final_flight_verified {
+                foreground_checkpoint = None;
+            }
+            self.ensure_transition_safety_if_foreground_changed(
+                inner,
+                main,
+                overlay,
+                selected_bar.as_deref(),
+                &mut foreground_checkpoint,
+            )?;
+            if !self.requested_visible.load(Ordering::Acquire) {
+                hide_main_window(main);
+                hide_overlay_window(overlay);
+                self.set_visual_phase(inner, "hidden", None, None);
+                return Ok(());
+            }
             show_main_inactive(main);
         } else {
             hide_main_window(main);
         }
+        hide_overlay_window(overlay);
         self.set_visual_phase(inner, "hidden", None, None);
         Ok(())
     }
@@ -1855,8 +2105,131 @@ fn show_main_inactive(window: &WebviewWindow) {
     }
 }
 
+/// The overlay's visibility is driven only through Win32. Tao's show/hide is
+/// queued to the event loop and rewrites the window style from its cached
+/// top-level flags; landing after attachment, that puts a caption on a taskbar
+/// child, which then stays painted in Explorer's surface.
 fn hide_overlay_window(window: &WebviewWindow) {
-    hide_taskbar_window(window);
+    if let Ok(hwnd) = native_hwnd(window) {
+        // SAFETY: this handle comes from the app-owned overlay WebviewWindow.
+        // SW_HIDE neither activates a window nor changes its saved frame.
+        unsafe { ShowWindow(hwnd as usize as *mut std::ffi::c_void, 0) };
+    }
+}
+
+fn show_overlay_on_top(hwnd: u64) {
+    const HWND_TOPMOST: isize = -1;
+    const FLAGS: u32 = 0x0001 | 0x0002 | 0x0010 | 0x0040;
+    // SAFETY: callers pass the detached, app-owned overlay HWND. The flags keep
+    // its size and position, avoid activation and only raise and show it.
+    unsafe {
+        SetWindowPos(
+            hwnd as usize as *mut std::ffi::c_void,
+            HWND_TOPMOST as *mut std::ffi::c_void,
+            0,
+            0,
+            0,
+            0,
+            FLAGS,
+        )
+    };
+}
+
+/// Pace flight frames with DWM composition, falling back to a short sleep
+/// when composition does not block.
+fn wait_for_next_frame() {
+    let started = Instant::now();
+    // SAFETY: DwmFlush takes no arguments and only blocks until the next present.
+    let flushed = unsafe { DwmFlush() } >= 0;
+    if !flushed || started.elapsed() < Duration::from_millis(2) {
+        thread::sleep(Duration::from_millis(6));
+    }
+}
+
+/// GetAsyncKeyState reports physical buttons, so honor swapped-button setups.
+fn primary_button_pressed() -> bool {
+    const SM_SWAPBUTTON: i32 = 23;
+    const VK_LBUTTON: i32 = 0x01;
+    const VK_RBUTTON: i32 = 0x02;
+    // SAFETY: both calls only read global input state.
+    let swapped = unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0;
+    let key = if swapped { VK_RBUTTON } else { VK_LBUTTON };
+    (unsafe { GetAsyncKeyState(key) } as u16 & 0x8000) != 0
+}
+
+/// A cheap signature for the foreground window. Full taskbar enumeration is
+/// only needed when this context changes or cannot be read.
+fn foreground_context() -> Option<model::ForegroundContext> {
+    // SAFETY: GetForegroundWindow and GetWindowRect only read desktop/window
+    // state; the returned handle is checked by GetWindowRect before use.
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_null() {
+        return None;
+    }
+    let mut bounds = Win32Rect::default();
+    if unsafe { GetWindowRect(hwnd, &mut bounds) } == 0 {
+        return None;
+    }
+    let bounds = Rect {
+        x: bounds.left,
+        y: bounds.top,
+        width: bounds.right.checked_sub(bounds.left)?,
+        height: bounds.bottom.checked_sub(bounds.top)?,
+    };
+    bounds.is_valid().then_some(model::ForegroundContext {
+        hwnd: hwnd as usize as u64,
+        bounds,
+    })
+}
+
+/// The visible client area of a window in physical screen pixels. The main
+/// window's outer rectangle also contains invisible resize borders.
+fn native_client_screen_rect(hwnd: u64) -> Option<NativeRect> {
+    let handle = hwnd as usize as *mut std::ffi::c_void;
+    let mut client = Win32Rect::default();
+    let mut origin = Win32Point::default();
+    // SAFETY: `hwnd` is an app-owned window and both out-parameters point to
+    // writable structs with the Win32 layout.
+    if unsafe { GetClientRect(handle, &mut client) } == 0
+        || unsafe { ClientToScreen(handle, &mut origin) } == 0
+    {
+        return None;
+    }
+    let rect = NativeRect {
+        x: origin.x,
+        y: origin.y,
+        width: client.right.checked_sub(client.left)?,
+        height: client.bottom.checked_sub(client.top)?,
+    };
+    rect.into_rect().is_valid().then_some(rect)
+}
+
+fn client_screen_rect(window: &WebviewWindow) -> Result<NativeRect, String> {
+    native_client_screen_rect(native_hwnd(window)?)
+        .ok_or_else(|| "main window client geometry is unavailable".to_string())
+}
+
+/// A visible, normal compact player, read without a round trip to the UI
+/// thread so it also works inside a move or size loop.
+fn native_floating_compact(hwnd: u64) -> bool {
+    let handle = hwnd as usize as *mut std::ffi::c_void;
+    // SAFETY: these calls only read state of the app-owned main HWND.
+    let (zoomed, iconic, dpi) =
+        unsafe { (IsZoomed(handle), IsIconic(handle), GetDpiForWindow(handle)) };
+    if zoomed != 0 || iconic != 0 || !(48..=768).contains(&dpi) {
+        return false;
+    }
+    let Some(rect) = native_client_screen_rect(hwnd) else {
+        return false;
+    };
+    let Ok((width, height)) = logical_client_size(
+        rect.width.unsigned_abs(),
+        rect.height.unsigned_abs(),
+        f64::from(dpi) / 96.0,
+    ) else {
+        return false;
+    };
+    model::compact_mode_is_valid(true, width, height)
 }
 
 fn set_native_window_rect(hwnd: u64, rect: NativeRect, show: bool) -> Result<(), String> {
@@ -1884,12 +2257,6 @@ fn set_native_window_rect(hwnd: u64, rect: NativeRect, show: bool) -> Result<(),
         ));
     }
     Ok(())
-}
-
-fn show_native_window_no_activate(hwnd: u64) {
-    // SAFETY: this is the app-owned overlay HWND. SW_SHOWNOACTIVATE keeps the
-    // taskbar animation from taking focus away from a fullscreen foreground app.
-    unsafe { ShowWindow(hwnd as usize as *mut std::ffi::c_void, 4) };
 }
 
 fn fail_closed(inner: &mut Inner, main: &WebviewWindow, overlay: &WebviewWindow, message: &str) {

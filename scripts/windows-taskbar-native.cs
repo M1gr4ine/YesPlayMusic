@@ -31,6 +31,7 @@ public static class TaskbarNative {
   [DllImport("user32.dll",SetLastError=true)] static extern bool ScreenToClient(IntPtr h,ref POINT p);
   [DllImport("user32.dll",SetLastError=true)] static extern bool GetClientRect(IntPtr h,out RECT r);
   [DllImport("user32.dll",SetLastError=true)] static extern bool ClientToScreen(IntPtr h,ref POINT p);
+  [DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr h,ref RECT update,IntPtr region,uint flags);
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h,out uint pid);
   [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr h);
   [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
@@ -63,7 +64,8 @@ public static class TaskbarNative {
     const long nonClientStyle=0x00C40000L,nonClientExStyle=0x00020301L;
     long style=GetWindowLongPtr(window,-16).ToInt64(),exStyle=GetWindowLongPtr(window,-20).ToInt64();
     long dockStyle=(style&~(WS_POPUP|nonClientStyle))|WS_CHILD,dockExStyle=exStyle&~nonClientExStyle;
-    bool changed=GetParent(window)!=host||style!=dockStyle||exStyle!=dockExStyle;
+    bool alreadyChild=GetParent(window)==host;
+    bool changed=!alreadyChild||style!=dockStyle||exStyle!=dockExStyle;
     if(changed){
       // Visibility changes can restore Tao's cached top-level frame. Preserve
       // live state bits while removing the taskbar child's non-client borders.
@@ -78,7 +80,21 @@ public static class TaskbarNative {
       (verifiedStyle&(WS_POPUP|nonClientStyle))!=0||(verifiedExStyle&nonClientExStyle)!=0)
       throw new Exception("Windows did not keep the borderless player attached to the taskbar");
     MeasureFrameExtent();
+    // A restyled child may already have painted a caption into Explorer's
+    // surface, which neither process repaints. Let the taskbar redraw it.
+    if(changed&&alreadyChild)RepaintBeneath(host);
     return changed;
+  }
+  static void RepaintBeneath(IntPtr host) {
+    RECT r;if(!GetWindowRect(window,out r))return;
+    POINT a=new POINT{x=r.left,y=r.top},b=new POINT{x=r.right,y=r.bottom};
+    if(!ScreenToClient(host,ref a)||!ScreenToClient(host,ref b))return;
+    RECT local=new RECT{left=a.x,top=a.y,right=b.x,bottom=b.y};
+    bool visible=IsWindowVisible(window);
+    if(visible)ShowWindow(window,0);
+    // RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN|RDW_UPDATENOW
+    RedrawWindow(host,ref local,IntPtr.Zero,0x0001|0x0004|0x0080|0x0100);
+    if(visible)ShowWindow(window,4);
   }
   static void MeasureFrameExtent() {
     RECT outer;

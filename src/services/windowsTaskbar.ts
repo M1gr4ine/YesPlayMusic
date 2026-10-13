@@ -49,7 +49,11 @@ export type TaskbarOverlayVisualPhase =
 export interface TaskbarOverlayVisual {
   phase: TaskbarOverlayVisualPhase;
   token: number;
+  durationMs?: number;
 }
+
+/** Feedback while the compact player is dragged near a taskbar. */
+export type TaskbarDockHint = 'none' | 'ready' | 'unavailable';
 
 export interface TaskbarOverlayReadyState {
   snapshot: TaskbarOverlaySnapshot | null;
@@ -251,6 +255,7 @@ export function normalizeTaskbarOverlayVisual(
   if (!isRecord(value)) return null;
   const phase = value['phase'];
   const token = value['token'];
+  const durationMs = value['durationMs'];
   if (
     (phase !== 'hidden' &&
       phase !== 'snapping' &&
@@ -262,7 +267,30 @@ export function normalizeTaskbarOverlayVisual(
   ) {
     return null;
   }
-  return { phase, token };
+  return isFiniteNonnegative(durationMs) && durationMs <= 2_000
+    ? { phase, token, durationMs }
+    : { phase, token };
+}
+
+export function normalizeTaskbarDockHint(
+  value: unknown
+): TaskbarDockHint | null {
+  if (!isRecord(value)) return null;
+  const state = value['state'];
+  return state === 'none' || state === 'ready' || state === 'unavailable'
+    ? state
+    : null;
+}
+
+export async function listenTaskbarDockHint(
+  listener: (hint: TaskbarDockHint) => void
+): Promise<() => void> {
+  if (!isTaskbarDockingAvailable()) return () => {};
+  const { listen } = await import('@tauri-apps/api/event');
+  return listen<unknown>('desktop://taskbarDockHint', event => {
+    const hint = normalizeTaskbarDockHint(event.payload);
+    if (hint) listener(hint);
+  });
 }
 
 export function normalizeTaskbarOverlayReadyState(

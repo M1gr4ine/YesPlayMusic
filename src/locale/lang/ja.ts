@@ -3,6 +3,8 @@ export default {
     closeWindow: 'ウィンドウを閉じる',
     loadingLyrics: '歌詞を読み込み中',
     floatMiniPlayer: 'フローティング表示に戻す',
+    releaseToDock: '離すとタスクバーにドッキング',
+    dockSpaceUnavailable: 'タスクバーの空きが足りません',
     play: '再生',
     songs: '曲',
   },
