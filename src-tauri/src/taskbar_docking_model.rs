@@ -19,6 +19,43 @@ pub fn foreground_context_changed(
     !matches!((previous, current), (Some(previous), Some(current)) if previous == current)
 }
 
+/// Allows a narrow steady-poll exception for a moving foreground window.
+/// Callers must still perform the normal fresh safety probe before showing the overlay.
+pub fn can_skip_steady_foreground_retry(
+    guard: SteadyPollGuard,
+    previous: Option<ForegroundContext>,
+    current: Option<ForegroundContext>,
+    monitor: Rect,
+) -> bool {
+    if !guard.selected_bar_matches
+        || !guard.attached
+        || guard.transitioning
+        || !guard.inner_requested_visible
+        || !guard.latest_requested_visible
+        || !guard.probe_complete
+        || guard.safety != ForegroundSafety::Clear
+        || !monitor.is_valid()
+    {
+        return false;
+    }
+
+    let (Some(previous), Some(current)) = (previous, current) else {
+        return false;
+    };
+    if previous.hwnd == 0
+        || previous.hwnd != current.hwnd
+        || !previous.bounds.is_valid()
+        || !current.bounds.is_valid()
+        || previous.bounds.width != current.bounds.width
+        || previous.bounds.height != current.bounds.height
+        || (previous.bounds.x == current.bounds.x && previous.bounds.y == current.bounds.y)
+    {
+        return false;
+    }
+
+    current.bounds.width < monitor.width || current.bounds.height < monitor.height
+}
+
 pub fn taskbar_snap_ease(progress: f64) -> f64 {
     let progress = progress.clamp(0.0, 1.0);
     let axis = |t: f64, first: f64, second: f64| {
@@ -59,6 +96,17 @@ pub enum ForegroundSafety {
     Clear,
     Fullscreen,
     Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SteadyPollGuard {
+    pub selected_bar_matches: bool,
+    pub attached: bool,
+    pub transitioning: bool,
+    pub inner_requested_visible: bool,
+    pub latest_requested_visible: bool,
+    pub probe_complete: bool,
+    pub safety: ForegroundSafety,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -285,11 +333,11 @@ pub fn should_persist_frame(compact: bool, docked: bool, transitioning: bool) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_mode_is_valid, dock_decision, dock_target, drag_dock_hint,
-        foreground_context_changed, interpolate_rect, live_compact_mode_is_valid, near_taskbar,
-        should_persist_frame, snap_tolerance, taskbar_snap_ease, validate_overlay_action,
-        validate_overlay_snapshot, DockMode, DragDockHint, ForegroundContext, ForegroundSafety,
-        Rect,
+        can_skip_steady_foreground_retry, compact_mode_is_valid, dock_decision, dock_target,
+        drag_dock_hint, foreground_context_changed, interpolate_rect, live_compact_mode_is_valid,
+        near_taskbar, should_persist_frame, snap_tolerance, taskbar_snap_ease,
+        validate_overlay_action, validate_overlay_snapshot, DockMode, DragDockHint,
+        ForegroundContext, ForegroundSafety, Rect, SteadyPollGuard,
     };
 
     const BOTTOM_TASKBAR: Rect = Rect {
@@ -349,6 +397,204 @@ mod tests {
         assert!(foreground_context_changed(Some(before), None));
         assert!(foreground_context_changed(None, Some(before)));
         assert!(foreground_context_changed(None, None));
+    }
+
+    fn eligible_steady_poll_guard() -> SteadyPollGuard {
+        SteadyPollGuard {
+            selected_bar_matches: true,
+            attached: true,
+            transitioning: false,
+            inner_requested_visible: true,
+            latest_requested_visible: true,
+            probe_complete: true,
+            safety: ForegroundSafety::Clear,
+        }
+    }
+
+    fn test_rect(x: i32, y: i32, width: i32, height: i32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn test_foreground(hwnd: u64, bounds: Rect) -> ForegroundContext {
+        ForegroundContext { hwnd, bounds }
+    }
+
+    #[test]
+    fn steady_attached_poll_keeps_showing_during_two_hundred_safe_translations() {
+        let monitor = test_rect(0, 0, 1920, 1080);
+        let guard = eligible_steady_poll_guard();
+        let mut previous = Some(test_foreground(0x1234, test_rect(100, 200, 380, 40)));
+        let mut visible = true;
+
+        for step in 1..=200 {
+            let current = test_foreground(0x1234, test_rect(100 + step, 200 + step, 380, 40));
+            if foreground_context_changed(previous, Some(current))
+                && !can_skip_steady_foreground_retry(guard, previous, Some(current), monitor)
+            {
+                visible = false;
+            }
+            assert!(visible, "overlay hidden on translation {step}");
+            assert!(dock_decision(true, true, true, ForegroundSafety::Clear).show);
+            previous = Some(current);
+        }
+    }
+
+    #[test]
+    fn steady_translation_exception_rejects_unsafe_or_unverifiable_contexts() {
+        let monitor = test_rect(0, 0, 1920, 1080);
+        let guard = eligible_steady_poll_guard();
+        let before = test_foreground(0x1234, test_rect(100, 200, 380, 40));
+        let moved = test_foreground(0x1234, test_rect(101, 200, 380, 40));
+        assert!(can_skip_steady_foreground_retry(
+            guard,
+            Some(before),
+            Some(moved),
+            monitor
+        ));
+
+        let guard_cases = [
+            (
+                "selected bar changed",
+                SteadyPollGuard {
+                    selected_bar_matches: false,
+                    ..guard
+                },
+            ),
+            (
+                "detached",
+                SteadyPollGuard {
+                    attached: false,
+                    ..guard
+                },
+            ),
+            (
+                "transitioning",
+                SteadyPollGuard {
+                    transitioning: true,
+                    ..guard
+                },
+            ),
+            (
+                "inner hidden",
+                SteadyPollGuard {
+                    inner_requested_visible: false,
+                    ..guard
+                },
+            ),
+            (
+                "latest hidden",
+                SteadyPollGuard {
+                    latest_requested_visible: false,
+                    ..guard
+                },
+            ),
+            (
+                "incomplete",
+                SteadyPollGuard {
+                    probe_complete: false,
+                    ..guard
+                },
+            ),
+            (
+                "fullscreen",
+                SteadyPollGuard {
+                    safety: ForegroundSafety::Fullscreen,
+                    ..guard
+                },
+            ),
+            (
+                "unknown",
+                SteadyPollGuard {
+                    safety: ForegroundSafety::Unknown,
+                    ..guard
+                },
+            ),
+        ];
+        for (label, state) in guard_cases {
+            assert!(
+                !can_skip_steady_foreground_retry(state, Some(before), Some(moved), monitor),
+                "allowed {label}"
+            );
+        }
+
+        let full_monitor_before = test_foreground(0x1234, test_rect(100, 200, 1920, 1080));
+        let full_monitor_moved = test_foreground(0x1234, test_rect(101, 201, 1920, 1080));
+        let geometry_cases: [(
+            &str,
+            Option<ForegroundContext>,
+            Option<ForegroundContext>,
+            Rect,
+        ); 9] = [
+            (
+                "size changed",
+                Some(before),
+                Some(test_foreground(0x1234, test_rect(101, 200, 381, 40))),
+                monitor,
+            ),
+            (
+                "different HWND",
+                Some(before),
+                Some(test_foreground(0x5678, moved.bounds)),
+                monitor,
+            ),
+            (
+                "zero HWND",
+                Some(before),
+                Some(test_foreground(0, moved.bounds)),
+                monitor,
+            ),
+            ("missing previous", None, Some(moved), monitor),
+            ("missing current", Some(before), None, monitor),
+            (
+                "invalid foreground rect",
+                Some(before),
+                Some(test_foreground(0x1234, test_rect(101, 200, 0, 40))),
+                monitor,
+            ),
+            (
+                "invalid selected monitor",
+                Some(before),
+                Some(moved),
+                test_rect(0, 0, 0, 1080),
+            ),
+            (
+                "may cover entire monitor",
+                Some(full_monitor_before),
+                Some(full_monitor_moved),
+                monitor,
+            ),
+            ("no translation", Some(before), Some(before), monitor),
+        ];
+        for (label, previous, current, selected_monitor) in geometry_cases {
+            assert!(
+                !can_skip_steady_foreground_retry(guard, previous, current, selected_monitor),
+                "allowed {label}"
+            );
+        }
+
+        let wide_before = test_foreground(0x1234, test_rect(100, 200, 1920, 40));
+        let wide_moved = test_foreground(0x1234, test_rect(101, 200, 1920, 40));
+        assert!(can_skip_steady_foreground_retry(
+            guard,
+            Some(wide_before),
+            Some(wide_moved),
+            monitor
+        ));
+    }
+
+    #[test]
+    fn stable_clear_context_recovers_visibility_after_unknown_probe() {
+        let hidden = dock_decision(true, true, true, ForegroundSafety::Unknown);
+        assert!(hidden.suspended && !hidden.show);
+        let stable = test_foreground(0x1234, test_rect(100, 200, 380, 40));
+        assert!(!foreground_context_changed(Some(stable), Some(stable)));
+        let recovered = dock_decision(true, true, true, ForegroundSafety::Clear);
+        assert!(!recovered.suspended && recovered.show);
     }
 
     #[test]

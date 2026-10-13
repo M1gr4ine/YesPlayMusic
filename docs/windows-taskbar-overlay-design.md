@@ -59,3 +59,11 @@ restyled child.
 Renderer HTML documents are served with no-store and ignore conditional
 validators. This prevents a stale index from referencing removed hashed assets
 after switching builds; hashed assets retain conditional cache validation.
+
+When the strip is already attached, a complete clear probe may tolerate pure
+position changes of the same valid foreground HWND. Both requested-visibility
+checks must still be true, and at least one window dimension must be smaller
+than that probe's monitor, so the moving window cannot cover the entire monitor.
+Size or HWND changes, unreadable samples, transitions and potentially
+fullscreen-sized windows retain the strict retry path. A fresh safety probe
+still runs before showing the attached overlay.

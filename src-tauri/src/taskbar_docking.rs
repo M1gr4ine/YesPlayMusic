@@ -986,19 +986,6 @@ impl TaskbarDockController {
             fail_closed(inner, main, overlay, "Taskbar detection is incomplete");
             return Ok(());
         }
-        let mut foreground_checkpoint = foreground_before_probe;
-        let foreground_after_probe = foreground_context();
-        if model::foreground_context_changed(foreground_checkpoint, foreground_after_probe) {
-            self.ensure_transition_safety_if_foreground_changed(
-                inner,
-                main,
-                overlay,
-                None,
-                &mut foreground_checkpoint,
-            )?;
-        } else {
-            foreground_checkpoint = foreground_after_probe;
-        }
         let bounds = match window_rect(window) {
             Ok(bounds) => bounds,
             Err(error) => {
@@ -1025,6 +1012,38 @@ impl TaskbarDockController {
             Some(false) if !bar.suspended => ForegroundSafety::Clear,
             _ => ForegroundSafety::Unknown,
         };
+        let mut foreground_checkpoint = foreground_before_probe;
+        let foreground_after_probe = foreground_context();
+        if model::foreground_context_changed(foreground_checkpoint, foreground_after_probe) {
+            let can_skip_steady_retry = model::can_skip_steady_foreground_retry(
+                model::SteadyPollGuard {
+                    selected_bar_matches: inner.attached_bar.as_deref()
+                        == Some(bar.handle.as_str()),
+                    attached: inner.attached,
+                    transitioning: inner.transitioning,
+                    inner_requested_visible: inner.requested_visible,
+                    latest_requested_visible: self.requested_visible.load(Ordering::Acquire),
+                    probe_complete: probe.complete,
+                    safety,
+                },
+                foreground_checkpoint,
+                foreground_after_probe,
+                bar.monitor.into(),
+            );
+            if can_skip_steady_retry {
+                foreground_checkpoint = foreground_after_probe;
+            } else {
+                self.ensure_transition_safety_if_foreground_changed(
+                    inner,
+                    main,
+                    overlay,
+                    None,
+                    &mut foreground_checkpoint,
+                )?;
+            }
+        } else {
+            foreground_checkpoint = foreground_after_probe;
+        }
         let safety_decision = model::dock_decision(
             inner.enabled,
             inner.compact,
