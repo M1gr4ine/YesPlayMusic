@@ -266,12 +266,10 @@ export default {
         qqQuickLogin: 'クイックログイン',
         qqQuickLoginBusy: 'QQ Music にログインしています…',
         qqQuickLoginSuccess: 'QQ Music のログイン情報を保存しました。',
-        qqQuickLoginRefresh:
-          'QQ Music のログイン情報を保存しました。自動更新できます。',
         qqQuickLoginConflict:
           'ログイン中に QQ Cookie が変更されたため、編集内容を保持しました。',
         qqQuickLoginFailed:
-          'QQ Music のログイン情報を保存できませんでした。元の Cookie を保持しました。',
+          'QQ Music にログインできませんでした。元の Cookie を保持しました。',
         joox: 'Joox 用の Cookie',
         qq: 'QQ 用の Cookie',
         desc1: '設定方法はこちら。',

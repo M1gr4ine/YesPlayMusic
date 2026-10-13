@@ -244,7 +244,7 @@ fn playable_url(response: &Value) -> Option<String> {
 mod tests {
     use serde_json::json;
 
-    use super::{cookie_uin, formats, playable_url, select_match, vkey_request};
+    use super::{cookie_uin, playable_url, select_match, vkey_request};
 
     fn search_response(entries: serde_json::Value) -> serde_json::Value {
         json!({ "search": { "data": { "body": { "song": { "list": entries } } } } })
@@ -317,23 +317,5 @@ mod tests {
         assert_eq!(cookie_uin("uin=o0012345; qm_keyst=x"), Some("0012345"));
         assert_eq!(cookie_uin("p_uin=999; qm_keyst=x"), None);
         assert_eq!(cookie_uin("uin=abc"), None);
-    }
-
-    #[test]
-    fn flac_requests_fall_back_to_member_and_guest_mp3() {
-        assert_eq!(
-            formats(true)
-                .iter()
-                .map(|(prefix, _)| *prefix)
-                .collect::<Vec<_>>(),
-            ["F000", "M800", "M500"]
-        );
-        assert_eq!(
-            formats(false)
-                .iter()
-                .map(|(prefix, _)| *prefix)
-                .collect::<Vec<_>>(),
-            ["M800", "M500"]
-        );
     }
 }

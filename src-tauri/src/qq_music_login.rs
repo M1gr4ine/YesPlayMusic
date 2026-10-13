@@ -1,30 +1,34 @@
-use serde::Serialize;
-#[cfg(target_os = "windows")]
-use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, State, WebviewWindow};
-#[cfg(target_os = "windows")]
-use tauri::{Emitter, Manager, WebviewWindowBuilder};
+//! QQ Music quick login (Windows): the official login page runs in a
+//! throwaway WebView2 profile, and the session cookies it leaves behind
+//! become the UNM QQ cookie.
 
-const MAIN_WINDOW_LABEL: &str = "main";
-#[cfg(target_os = "windows")]
-const AUTH_WINDOW_LABEL: &str = "qq-music-login-auth";
-#[cfg(target_os = "windows")]
-const LOGIN_URL: &str = "https://y.qq.com/n/ryqq/profile";
-#[cfg(target_os = "windows")]
-const COOKIE_URL: &str = "https://y.qq.com/";
-#[cfg(target_os = "windows")]
-const CANDIDATE_EVENT: &str = "qq-music-login://candidate";
-#[cfg(any(target_os = "windows", test))]
-const COOKIE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
-#[cfg(any(target_os = "windows", test))]
-const COOKIE_STABILITY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1_500);
-#[cfg(any(target_os = "windows", test))]
-const PROFILE_CLEANUP_ATTEMPTS: usize = 13;
-#[cfg(any(target_os = "windows", test))]
-const PROFILE_CLEANUP_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+use tauri::{AppHandle, WebviewWindow};
 
+/// Resolves with the UNM cookie, or `None` when the user closes the window.
+#[tauri::command]
+pub async fn qq_music_login(
+    window: WebviewWindow,
+    app: AppHandle,
+) -> Result<Option<String>, String> {
+    if window.label() != "main" {
+        return Err("QQ Music login can only be opened from the main window".to_owned());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        windows::login(app, window).await
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        Err("QQ Music quick login is only available on Windows".to_owned())
+    }
+}
+
+/// Cookies UNM forwards to QQ, in the order they are written.
 #[cfg(any(target_os = "windows", test))]
-const QQ_COOKIE_NAMES: &[&str] = &[
+const SESSION_COOKIE_NAMES: &[&str] = &[
     "uin",
     "qqmusic_key",
     "qm_keyst",
@@ -46,858 +50,362 @@ const QQ_COOKIE_NAMES: &[&str] = &[
     "wxrefresh_token",
 ];
 
-#[derive(Clone, Default)]
-pub struct QqMusicLoginState {
-    #[cfg(target_os = "windows")]
-    inner: Arc<Mutex<Option<LoginSession>>>,
-}
+/// A login without a refresh token settles over several redirects.
+#[cfg(any(target_os = "windows", test))]
+const SETTLE_TIME: std::time::Duration = std::time::Duration::from_millis(1_500);
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenQqMusicLoginResponse {
-    attempt_id: String,
-    reused: bool,
-}
-
-#[cfg(target_os = "windows")]
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct QqMusicLoginCandidateEvent {
-    attempt_id: String,
-    value: String,
+#[cfg(any(target_os = "windows", test))]
+struct Session {
+    cookie: String,
     can_refresh: bool,
 }
 
 #[cfg(any(target_os = "windows", test))]
-struct CookieField {
-    name: String,
-    value: String,
-    domain: Option<String>,
+fn is_qq_url(url: &tauri::webview::Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str().is_some_and(|host| {
+            let host = host.to_ascii_lowercase();
+            host == "qq.com" || host.ends_with(".qq.com")
+        })
 }
 
+/// The session in the given cookies, once QQ has issued an account and a
+/// music key. Only first-party QQ Music cookies are exported.
 #[cfg(any(target_os = "windows", test))]
-struct NormalizedCookie {
-    value: String,
-    can_refresh: bool,
-}
-
-pub fn is_main_window_label(label: &str) -> bool {
-    label == MAIN_WINDOW_LABEL
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn is_allowed_qq_cookie_domain(domain: Option<&str>) -> bool {
-    let normalized = domain
-        .unwrap_or_default()
-        .strip_prefix('.')
-        .unwrap_or(domain.unwrap_or_default())
-        .to_ascii_lowercase();
-    normalized == "qq.com" || normalized == "y.qq.com"
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn is_official_qq_url(url: &tauri::webview::Url) -> bool {
-    if url.scheme() != "https" {
-        return false;
-    }
-    url.host_str().is_some_and(|host| {
-        host.eq_ignore_ascii_case("qq.com") || host.to_ascii_lowercase().ends_with(".qq.com")
-    })
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn is_auth_navigation_url(url: &tauri::webview::Url) -> bool {
-    url.as_str() == "about:blank" || is_official_qq_url(url)
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn normalize_qq_cookies(cookies: &[CookieField]) -> Option<NormalizedCookie> {
-    let mut fields = std::collections::HashMap::<String, String>::new();
+fn session_from_cookies(cookies: &[tauri::webview::Cookie<'_>]) -> Option<Session> {
+    let mut fields = std::collections::HashMap::new();
     for cookie in cookies {
-        if !QQ_COOKIE_NAMES.contains(&cookie.name.as_str())
-            || !is_allowed_qq_cookie_domain(cookie.domain.as_deref())
-            || cookie.value.is_empty()
-            || cookie
-                .value
-                .chars()
-                .any(|character| character.is_whitespace() || character.is_control())
+        let domain = cookie.domain().unwrap_or_default().trim_start_matches('.');
+        let value = cookie.value();
+        if SESSION_COOKIE_NAMES.contains(&cookie.name())
+            && (domain.eq_ignore_ascii_case("qq.com") || domain.eq_ignore_ascii_case("y.qq.com"))
+            && !value.is_empty()
+            && !value.chars().any(|c| c.is_whitespace() || c.is_control())
         {
-            continue;
+            fields.insert(cookie.name(), value);
         }
-        fields.insert(cookie.name.clone(), cookie.value.clone());
     }
 
+    if !fields.get("uin")?.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    // QQ issues one of the two key names depending on the login type.
     let key = fields
         .get("qqmusic_key")
         .or_else(|| fields.get("qm_keyst"))
-        .cloned()?;
-    if !fields
-        .get("uin")
-        .is_some_and(|uin| !uin.is_empty() && uin.bytes().all(|byte| byte.is_ascii_digit()))
-    {
-        return None;
-    }
-    fields.insert("qqmusic_key".to_owned(), key.clone());
-    fields.insert("qm_keyst".to_owned(), key);
+        .copied()?;
+    fields.insert("qqmusic_key", key);
+    fields.insert("qm_keyst", key);
 
-    let can_refresh =
-        fields.contains_key("psrf_qqrefresh_token") || fields.contains_key("qqrefresh_token");
-    let value = QQ_COOKIE_NAMES
+    let cookie = SESSION_COOKIE_NAMES
         .iter()
-        .filter_map(|name| fields.get(*name).map(|value| format!("{name}={value}")))
+        .filter_map(|name| fields.get(name).map(|value| format!("{name}={value}")))
         .collect::<Vec<_>>()
         .join("; ");
-    Some(NormalizedCookie { value, can_refresh })
+    let can_refresh =
+        fields.contains_key("psrf_qqrefresh_token") || fields.contains_key("qqrefresh_token");
+    Some(Session {
+        cookie,
+        can_refresh,
+    })
 }
 
-#[tauri::command]
-pub async fn open_qq_music_login(
-    window: WebviewWindow,
-    app: AppHandle,
-    state: State<'_, QqMusicLoginState>,
-) -> Result<OpenQqMusicLoginResponse, String> {
-    if !is_main_window_label(window.label()) {
-        return Err("QQ Music login can only be opened from the main window".to_owned());
+/// Accepts a session with a refresh token at once, and any other session
+/// after it has stayed unchanged for [`SETTLE_TIME`].
+#[cfg(any(target_os = "windows", test))]
+fn settled_cookie(
+    pending: &mut Option<(String, std::time::Instant)>,
+    session: Option<Session>,
+    now: std::time::Instant,
+) -> Option<String> {
+    let Some(session) = session else {
+        *pending = None;
+        return None;
+    };
+    if session.can_refresh {
+        return Some(session.cookie);
     }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (app, state);
-        Err("QQ Music quick login is only available on Windows".to_owned())
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        open_windows_login(window, app, state.inner.clone()).await
-    }
-}
-
-#[tauri::command]
-pub async fn finish_qq_music_login(
-    window: WebviewWindow,
-    state: State<'_, QqMusicLoginState>,
-    attempt_id: String,
-    value: Option<String>,
-    committed: bool,
-) -> Result<(), String> {
-    if !is_main_window_label(window.label()) {
-        return Err("QQ Music login can only be completed from the main window".to_owned());
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = (state, attempt_id, value, committed);
-        Err("QQ Music quick login is only available on Windows".to_owned())
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let auth_window = {
-            let mut active = state
-                .inner
-                .lock()
-                .map_err(|_| "QQ Music login is unavailable".to_owned())?;
-            let session = active
-                .as_mut()
-                .filter(|session| session.attempt_id == attempt_id)
-                .ok_or_else(|| "QQ Music login attempt is no longer active".to_owned())?;
-
-            if committed {
-                let candidate = session
-                    .candidate
-                    .as_ref()
-                    .ok_or_else(|| "QQ Music login candidate is no longer active".to_owned())?;
-                if value.as_deref() != Some(candidate.value.as_str()) {
-                    return Err("QQ Music login candidate did not match".to_owned());
-                }
-            }
-            session
-                .cancelled
-                .store(true, std::sync::atomic::Ordering::Release);
-            session.window.clone()
-        };
-        auth_window
-            .close()
-            .map_err(|_| "Unable to close the QQ Music login window".to_owned())
-    }
-}
-
-#[cfg(target_os = "windows")]
-struct LoginSession {
-    attempt_id: String,
-    window: WebviewWindow,
-    candidate: Option<NormalizedCookie>,
-    ready: bool,
-    _temporary_profile: tempfile::TempDir,
-    cancelled: Arc<std::sync::atomic::AtomicBool>,
-    poller: Option<std::thread::JoinHandle<()>>,
-}
-
-#[cfg(target_os = "windows")]
-async fn open_windows_login(
-    owner: WebviewWindow,
-    app: AppHandle,
-    state: Arc<Mutex<Option<LoginSession>>>,
-) -> Result<OpenQqMusicLoginResponse, String> {
-    let login_url = LOGIN_URL
-        .parse()
-        .map_err(|_| "Unable to prepare the QQ Music login URL".to_owned())?;
-    {
-        let active = state
-            .lock()
-            .map_err(|_| "QQ Music login is unavailable".to_owned())?;
-        if let Some(session) = active.as_ref() {
-            if !is_login_attempt_active(&session.cancelled)
-                || app.get_webview_window(AUTH_WINDOW_LABEL).is_none()
-            {
-                return Err("The previous QQ Music login window is still closing".to_owned());
-            }
-            if session.ready {
-                session
-                    .window
-                    .show()
-                    .map_err(|_| "Unable to show the QQ Music login window".to_owned())?;
-                session
-                    .window
-                    .set_focus()
-                    .map_err(|_| "Unable to focus the QQ Music login window".to_owned())?;
-            }
-            if let Some(candidate) = session.candidate.as_ref() {
-                let _ = app.emit_to(
-                    MAIN_WINDOW_LABEL,
-                    CANDIDATE_EVENT,
-                    QqMusicLoginCandidateEvent {
-                        attempt_id: session.attempt_id.clone(),
-                        value: candidate.value.clone(),
-                        can_refresh: candidate.can_refresh,
-                    },
-                );
-            }
-            return Ok(OpenQqMusicLoginResponse {
-                attempt_id: session.attempt_id.clone(),
-                reused: true,
-            });
+    match pending {
+        Some((cookie, since)) if *cookie == session.cookie => {
+            (now.duration_since(*since) >= SETTLE_TIME).then_some(session.cookie)
+        }
+        _ => {
+            *pending = Some((session.cookie, now));
+            None
         }
     }
+}
 
-    let temporary_profile = tempfile::Builder::new()
-        .prefix("yesplaymusic-qq-login-")
-        .tempdir()
-        .map_err(|_| "Unable to prepare the QQ Music login profile".to_owned())?;
-    let attempt_id = new_attempt_id()?;
-    let blank_url = "about:blank"
-        .parse()
-        .map_err(|_| "Unable to prepare the QQ Music login URL".to_owned())?;
-    let app_for_new_window = app.clone();
-    let navigation_window = WebviewWindowBuilder::new(
-            &app,
-            AUTH_WINDOW_LABEL,
-            tauri::WebviewUrl::External(blank_url),
+#[cfg(target_os = "windows")]
+mod windows {
+    use std::{
+        path::Path,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::{Duration, Instant},
+    };
+
+    use tauri::{
+        webview::Url, AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+        WindowEvent,
+    };
+
+    use super::{is_qq_url, session_from_cookies, settled_cookie};
+
+    const WINDOW_LABEL: &str = "qq-music-login";
+    const LOGIN_URL: &str = "https://y.qq.com/n/ryqq/profile";
+    const COOKIE_URL: &str = "https://y.qq.com/";
+    const POLL_INTERVAL: Duration = Duration::from_millis(400);
+    // The profile page only links to the login dialog; open it for the user.
+    const OPEN_LOGIN_DIALOG: &str = "setTimeout(()=>{if(location.hostname!=='y.qq.com'||document.querySelector('#login_frame'))return;document.querySelector('a.top_login__link')?.click();},700)";
+
+    pub async fn login(app: AppHandle, owner: WebviewWindow) -> Result<Option<String>, String> {
+        if let Some(existing) = app.get_webview_window(WINDOW_LABEL) {
+            let _ = existing.set_focus();
+            return Err("QQ Music login is already open".to_owned());
+        }
+
+        let profile = tempfile::Builder::new()
+            .prefix("yesplaymusic-qq-login-")
+            .tempdir()
+            .map_err(|_| "Unable to prepare the QQ Music login profile".to_owned())?
+            .keep();
+        let window = match build_window(&app, &owner, &profile) {
+            Ok(window) => window,
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&profile);
+                return Err(error);
+            }
+        };
+
+        let closed = Arc::new(AtomicBool::new(false));
+        let closed_flag = closed.clone();
+        window.on_window_event(move |event| {
+            if matches!(event, WindowEvent::Destroyed) {
+                closed_flag.store(true, Ordering::Release);
+                let profile = profile.clone();
+                std::thread::spawn(move || remove_profile(&profile));
+            }
+        });
+
+        // Deny permission prompts before any QQ page loads.
+        let page = window.clone();
+        let opened = window.with_webview(move |webview| {
+            let opened = deny_permission_requests(webview).is_ok()
+                && LOGIN_URL
+                    .parse()
+                    .is_ok_and(|url| page.navigate(url).is_ok())
+                && page.show().is_ok();
+            if opened {
+                let _ = page.set_focus();
+            } else {
+                let _ = page.close();
+            }
+        });
+        if opened.is_err() {
+            let _ = window.close();
+            return Err("Unable to open the QQ Music login page".to_owned());
+        }
+
+        tauri::async_runtime::spawn_blocking(move || {
+            let cookie = wait_for_session(&window, &closed);
+            let _ = window.close();
+            cookie
+        })
+        .await
+        .map_err(|_| "QQ Music login stopped unexpectedly".to_owned())
+    }
+
+    fn build_window(
+        app: &AppHandle,
+        owner: &WebviewWindow,
+        profile: &Path,
+    ) -> Result<WebviewWindow, String> {
+        let popup_app = app.clone();
+        WebviewWindowBuilder::new(
+            app,
+            WINDOW_LABEL,
+            WebviewUrl::External("about:blank".parse().map_err(window_error)?),
         )
-        .parent(&owner)
-        .map_err(|_| "Unable to create the QQ Music login window".to_owned())?
+        .parent(owner)
+        .map_err(window_error)?
         .title("Connect QQ Music")
         .inner_size(1_040.0, 760.0)
         .min_inner_size(800.0, 600.0)
         .center()
         .visible(false)
-        .data_directory(temporary_profile.path().to_path_buf())
+        .data_directory(profile.to_path_buf())
         .incognito(true)
-        .on_navigation(is_auth_navigation_url)
+        .on_navigation(|url| url.as_str() == "about:blank" || is_qq_url(url))
         .on_page_load(|webview, payload| {
-            if payload.event() != tauri::webview::PageLoadEvent::Finished
-                || !payload
-                    .url()
-                    .host_str()
-                    .is_some_and(|host| host.eq_ignore_ascii_case("y.qq.com"))
+            if payload.event() == tauri::webview::PageLoadEvent::Finished
+                && payload.url().host_str() == Some("y.qq.com")
             {
-                return;
+                let _ = webview.eval(OPEN_LOGIN_DIALOG);
             }
-            let _ = webview.eval(
-                "setTimeout(()=>{if(location.hostname!=='y.qq.com'||document.querySelector('#login_frame'))return;const link=document.querySelector('a.top_login__link');if(link)link.click();},700)",
-            );
         })
         .on_new_window(move |url, _features| {
-            if is_official_qq_url(&url) {
-                if let Some(target) = app_for_new_window.get_webview_window(AUTH_WINDOW_LABEL) {
-                    let _ = target.navigate(url);
+            // Keep QQ's login popups inside the isolated window.
+            if is_qq_url(&url) {
+                if let Some(window) = popup_app.get_webview_window(WINDOW_LABEL) {
+                    let _ = window.navigate(url);
                 }
             }
             tauri::webview::NewWindowResponse::Deny
-        });
-
-    let auth_window = navigation_window
+        })
         .build()
-        .map_err(|_| "Unable to create the QQ Music login window".to_owned())?;
-
-    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let session = LoginSession {
-        attempt_id: attempt_id.clone(),
-        window: auth_window.clone(),
-        candidate: None,
-        ready: false,
-        _temporary_profile: temporary_profile,
-        cancelled: cancelled.clone(),
-        poller: None,
-    };
-    {
-        let mut active = state
-            .lock()
-            .map_err(|_| "QQ Music login is unavailable".to_owned())?;
-        if let Some(existing) = active.as_ref() {
-            let _ = auth_window.close();
-            if is_login_attempt_active(&existing.cancelled)
-                && app.get_webview_window(AUTH_WINDOW_LABEL).is_some()
-            {
-                return Ok(OpenQqMusicLoginResponse {
-                    attempt_id: existing.attempt_id.clone(),
-                    reused: true,
-                });
-            }
-            return Err("The previous QQ Music login window is still closing".to_owned());
-        }
-        *active = Some(session);
+        .map_err(window_error)
     }
 
-    install_destroy_cleanup(&auth_window, app.clone(), state.clone(), attempt_id.clone());
-
-    let (start_sender, start_receiver) = std::sync::mpsc::sync_channel(0);
-    let poller_state = state.clone();
-    let poller_app = app.clone();
-    let poller_window = auth_window.clone();
-    let poller_attempt = attempt_id.clone();
-    let poller_cancelled = cancelled.clone();
-    let poller = std::thread::spawn(move || {
-        if start_receiver.recv().is_ok() {
-            poll_qq_music_cookies(
-                poller_app,
-                poller_window,
-                poller_state,
-                poller_attempt,
-                poller_cancelled,
-            );
-        }
-    });
-    if let Ok(mut active) = state.lock() {
-        if let Some(session) = active
-            .as_mut()
-            .filter(|session| session.attempt_id == attempt_id)
-        {
-            session.poller = Some(poller);
-        }
+    fn window_error<E>(_: E) -> String {
+        "Unable to create the QQ Music login window".to_owned()
     }
-    let _ = start_sender.send(());
 
-    let (hook_sender, hook_receiver) = std::sync::mpsc::sync_channel(1);
-    let window_for_hook = auth_window.clone();
-    let cancelled_for_hook = cancelled.clone();
-    let hook_submission = auth_window
-        .with_webview(move |webview| {
-            let result = if !is_login_attempt_active(&cancelled_for_hook) {
-                Err("QQ Music login setup was cancelled".to_owned())
-            } else if deny_webview_permissions(webview).is_ok() {
-                if !is_login_attempt_active(&cancelled_for_hook) {
-                    Err("QQ Music login setup was cancelled".to_owned())
-                } else {
-                    window_for_hook
-                        .navigate(login_url)
-                        .map_err(|_| "Unable to open the QQ Music login page".to_owned())
-                }
-            } else {
-                Err("Unable to restrict QQ Music login permissions".to_owned())
-            };
-            let result = if is_login_attempt_active(&cancelled_for_hook) {
-                result
-            } else {
-                Err("QQ Music login setup was cancelled".to_owned())
-            };
-            let _ = hook_sender.send(result);
-        })
-        .map_err(|_| "Unable to initialize QQ Music login security".to_owned());
-
-    let setup_result = match hook_submission {
-        Err(error) => Err(error),
-        Ok(()) => match tauri::async_runtime::spawn_blocking(move || {
-            hook_receiver.recv_timeout(std::time::Duration::from_secs(8))
-        })
-        .await
-        {
-            Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(error))) => Err(error),
-            Ok(Err(_)) | Err(_) => Err("Unable to initialize QQ Music login security".to_owned()),
-        },
-    };
-    finish_login_setup(setup_result, &cancelled, || {
-        let _ = auth_window.close();
-    })?;
-
-    let shown = if is_login_attempt_active(&cancelled) {
-        auth_window
-            .show()
-            .and_then(|()| auth_window.set_focus())
-            .map_err(|_| "Unable to open the QQ Music login page".to_owned())
-    } else {
-        Err("QQ Music login setup was cancelled".to_owned())
-    };
-    finish_login_setup(shown, &cancelled, || {
-        let _ = auth_window.close();
-    })?;
-
-    let ready = state
-        .lock()
-        .map_err(|_| "QQ Music login is unavailable".to_owned())
-        .and_then(|mut active| {
-            active
-                .as_mut()
-                .filter(|session| session.attempt_id == attempt_id)
-                .map(|session| session.ready = true)
-                .ok_or_else(|| "QQ Music login attempt is no longer active".to_owned())
-        });
-    finish_login_setup(ready, &cancelled, || {
-        let _ = auth_window.close();
-    })?;
-
-    Ok(OpenQqMusicLoginResponse {
-        attempt_id,
-        reused: false,
-    })
-}
-
-#[cfg(target_os = "windows")]
-fn new_attempt_id() -> Result<String, String> {
-    let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).map_err(|_| "Unable to start QQ Music login".to_owned())?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
-#[cfg(target_os = "windows")]
-fn install_destroy_cleanup(
-    window: &WebviewWindow,
-    app: AppHandle,
-    state: Arc<Mutex<Option<LoginSession>>>,
-    attempt_id: String,
-) {
-    window.on_window_event(move |event| {
-        if !matches!(event, tauri::WindowEvent::Destroyed) {
-            return;
-        }
-        let session = state.lock().ok().and_then(|mut active| {
-            if active
-                .as_ref()
-                .is_some_and(|session| session.attempt_id == attempt_id)
+    fn wait_for_session(window: &WebviewWindow, closed: &AtomicBool) -> Option<String> {
+        let cookie_url: Url = COOKIE_URL.parse().ok()?;
+        let mut pending = None;
+        while !closed.load(Ordering::Acquire) {
+            // Cookie reads include the HttpOnly session cookies.
+            let cookies = window
+                .cookies_for_url(cookie_url.clone())
+                .unwrap_or_default();
+            if let Some(cookie) =
+                settled_cookie(&mut pending, session_from_cookies(&cookies), Instant::now())
             {
-                active.take()
-            } else {
-                None
+                return Some(cookie);
             }
-        });
-        if let Some(mut session) = session {
-            session
-                .cancelled
-                .store(true, std::sync::atomic::Ordering::Release);
-            let poller = session.poller.take();
-            std::thread::spawn(move || {
-                if let Some(poller) = poller {
-                    let _ = poller.join();
-                }
-                let LoginSession {
-                    window,
-                    _temporary_profile: temporary_profile,
-                    ..
-                } = session;
-                let profile_path = temporary_profile.keep();
-                drop(window);
-                if remove_profile_with_retry(
-                    || std::fs::remove_dir_all(&profile_path),
-                    std::thread::sleep,
-                )
-                .is_err()
-                {
-                    eprintln!(
-                        "QQ Music login temporary profile could not be removed after retries"
-                    );
-                }
-            });
+            std::thread::sleep(POLL_INTERVAL);
         }
-        let _ = app.emit_to(
-            MAIN_WINDOW_LABEL,
-            CANDIDATE_EVENT,
-            QqMusicLoginCandidateEvent {
-                attempt_id: attempt_id.clone(),
-                value: String::new(),
-                can_refresh: false,
+        None
+    }
+
+    /// WebView2 releases the profile shortly after its window is destroyed.
+    fn remove_profile(profile: &Path) {
+        for _ in 0..12 {
+            match std::fs::remove_dir_all(profile) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(_) => std::thread::sleep(Duration::from_millis(250)),
+            }
+        }
+        eprintln!("QQ Music login profile could not be removed");
+    }
+
+    fn deny_permission_requests(
+        webview: tauri::webview::PlatformWebview,
+    ) -> windows_core::Result<()> {
+        use webview2_com::{
+            Microsoft::Web::WebView2::Win32::{
+                ICoreWebView2_12, COREWEBVIEW2_PERMISSION_STATE_DENY,
             },
-        );
-    });
-}
+            PermissionRequestedEventHandler,
+        };
+        use windows_core::Interface;
 
-#[cfg(any(target_os = "windows", test))]
-fn remove_profile_with_retry(
-    mut remove: impl FnMut() -> std::io::Result<()>,
-    mut sleep: impl FnMut(std::time::Duration),
-) -> std::io::Result<()> {
-    for attempt in 0..PROFILE_CLEANUP_ATTEMPTS {
-        match remove() {
-            Ok(()) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) if attempt + 1 == PROFILE_CLEANUP_ATTEMPTS => return Err(error),
-            Err(_) => sleep(PROFILE_CLEANUP_RETRY_INTERVAL),
-        }
-    }
-
-    unreachable!("profile cleanup always attempts removal at least once");
-}
-
-#[cfg(target_os = "windows")]
-fn poll_qq_music_cookies(
-    app: AppHandle,
-    window: WebviewWindow,
-    state: Arc<Mutex<Option<LoginSession>>>,
-    attempt_id: String,
-    cancelled: Arc<std::sync::atomic::AtomicBool>,
-) {
-    let cookie_url = match COOKIE_URL.parse::<tauri::webview::Url>() {
-        Ok(url) => url,
-        Err(_) => return,
-    };
-    let mut previous: Option<(String, std::time::Instant)> = None;
-
-    while !cancelled.load(std::sync::atomic::Ordering::Acquire) {
-        let cookies = window
-            .cookies_for_url(cookie_url.clone())
-            .unwrap_or_default();
-        let fields = cookies
-            .iter()
-            .map(|cookie| CookieField {
-                name: cookie.name().to_owned(),
-                value: cookie.value().to_owned(),
-                domain: cookie.domain().map(str::to_owned),
-            })
-            .collect::<Vec<_>>();
-
-        let candidate = normalize_qq_cookies(&fields);
-        if let Some(candidate) = candidate {
-            if candidate_is_ready(&mut previous, &candidate, std::time::Instant::now()) {
-                let emit_candidate = {
-                    let mut active = match state.lock() {
-                        Ok(active) => active,
-                        Err(_) => return,
-                    };
-                    let Some(session) = active
-                        .as_mut()
-                        .filter(|session| session.attempt_id == attempt_id)
-                    else {
-                        return;
-                    };
-                    if cancelled.load(std::sync::atomic::Ordering::Acquire)
-                        || session.candidate.is_some()
-                    {
-                        false
-                    } else {
-                        session.candidate = Some(NormalizedCookie {
-                            value: candidate.value.clone(),
-                            can_refresh: candidate.can_refresh,
-                        });
-                        true
-                    }
-                };
-                if emit_candidate {
-                    if app
-                        .emit_to(
-                            MAIN_WINDOW_LABEL,
-                            CANDIDATE_EVENT,
-                            QqMusicLoginCandidateEvent {
-                                attempt_id: attempt_id.clone(),
-                                value: candidate.value,
-                                can_refresh: candidate.can_refresh,
-                            },
-                        )
-                        .is_ok()
-                    {
-                        return;
-                    }
-                    if let Ok(mut active) = state.lock() {
-                        if let Some(session) = active
-                            .as_mut()
-                            .filter(|session| session.attempt_id == attempt_id)
-                        {
-                            session.candidate = None;
-                        }
-                    }
-                }
+        let core = unsafe { webview.controller().CoreWebView2() }?.cast::<ICoreWebView2_12>()?;
+        let handler = PermissionRequestedEventHandler::create(Box::new(|_sender, args| {
+            if let Some(args) = args {
+                unsafe { args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)? };
             }
-        } else {
-            previous = None;
-        }
-
-        std::thread::sleep(COOKIE_POLL_INTERVAL);
+            Ok(())
+        }));
+        let mut token = 0i64;
+        unsafe { core.add_PermissionRequested(&handler, &mut token) }
     }
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn candidate_is_ready(
-    previous: &mut Option<(String, std::time::Instant)>,
-    candidate: &NormalizedCookie,
-    now: std::time::Instant,
-) -> bool {
-    if candidate.can_refresh {
-        return true;
-    }
-    match previous.as_ref() {
-        Some((value, since)) if value == &candidate.value => {
-            now.duration_since(*since) >= COOKIE_STABILITY_INTERVAL
-        }
-        _ => {
-            *previous = Some((candidate.value.clone(), now));
-            false
-        }
-    }
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn finish_login_setup<T>(
-    result: Result<T, String>,
-    cancelled: &std::sync::atomic::AtomicBool,
-    close_window: impl FnOnce(),
-) -> Result<T, String> {
-    if result.is_err() {
-        cancelled.store(true, std::sync::atomic::Ordering::Release);
-        close_window();
-    }
-    result
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn is_login_attempt_active(cancelled: &std::sync::atomic::AtomicBool) -> bool {
-    !cancelled.load(std::sync::atomic::Ordering::Acquire)
-}
-
-#[cfg(target_os = "windows")]
-fn deny_webview_permissions(webview: tauri::webview::PlatformWebview) -> Result<(), ()> {
-    use webview2_com::{
-        Microsoft::Web::WebView2::Win32::{ICoreWebView2_12, COREWEBVIEW2_PERMISSION_STATE_DENY},
-        PermissionRequestedEventHandler,
-    };
-    use windows_core::Interface;
-
-    let controller = webview.controller();
-    let core = unsafe { controller.CoreWebView2() }.map_err(|_| ())?;
-    let core_with_permissions = core.cast::<ICoreWebView2_12>().map_err(|_| ())?;
-    let handler = PermissionRequestedEventHandler::create(Box::new(|_sender, args| {
-        if let Some(args) = args {
-            unsafe { args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)? };
-        }
-        Ok(())
-    }));
-    let mut token = 0i64;
-    unsafe { core_with_permissions.add_PermissionRequested(&handler, &mut token) }.map_err(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        candidate_is_ready, finish_login_setup, is_allowed_qq_cookie_domain,
-        is_auth_navigation_url, is_login_attempt_active, is_main_window_label, is_official_qq_url,
-        normalize_qq_cookies, remove_profile_with_retry, CookieField, NormalizedCookie,
-        COOKIE_STABILITY_INTERVAL, PROFILE_CLEANUP_ATTEMPTS, PROFILE_CLEANUP_RETRY_INTERVAL,
-    };
+    use std::time::{Duration, Instant};
 
-    fn field(name: &str, value: &str, domain: &str) -> CookieField {
-        CookieField {
-            name: name.to_owned(),
-            value: value.to_owned(),
-            domain: Some(domain.to_owned()),
-        }
+    use tauri::webview::Cookie;
+
+    use super::{is_qq_url, session_from_cookies, settled_cookie, Session, SETTLE_TIME};
+
+    fn cookie(name: &'static str, value: &'static str, domain: &'static str) -> Cookie<'static> {
+        Cookie::build((name, value)).domain(domain).build()
+    }
+
+    fn session(cookie: &str, can_refresh: bool) -> Option<Session> {
+        Some(Session {
+            cookie: cookie.to_owned(),
+            can_refresh,
+        })
     }
 
     #[test]
-    fn cookie_domain_allowlist_is_exact() {
-        assert!(is_allowed_qq_cookie_domain(Some(".qq.com")));
-        assert!(is_allowed_qq_cookie_domain(Some("y.qq.com")));
-        assert!(!is_allowed_qq_cookie_domain(Some("login.qq.com")));
-        assert!(!is_allowed_qq_cookie_domain(Some("qq.com.evil.test")));
-    }
-
-    #[test]
-    fn navigation_requires_https_and_a_qq_domain() {
-        assert!(is_official_qq_url(
+    fn only_https_qq_hosts_are_navigable() {
+        assert!(is_qq_url(
             &"https://y.qq.com/n/ryqq/profile".parse().unwrap()
         ));
-        assert!(is_official_qq_url(
-            &"https://login.qq.com/".parse().unwrap()
-        ));
-        assert!(!is_official_qq_url(&"http://y.qq.com/".parse().unwrap()));
-        assert!(!is_official_qq_url(
-            &"https://qq.com.evil.test/".parse().unwrap()
-        ));
-        assert!(is_auth_navigation_url(&"about:blank".parse().unwrap()));
-        assert!(!is_auth_navigation_url(
-            &"https://example.com/".parse().unwrap()
-        ));
+        assert!(is_qq_url(&"https://graph.qq.com/".parse().unwrap()));
+        assert!(!is_qq_url(&"http://y.qq.com/".parse().unwrap()));
+        assert!(!is_qq_url(&"https://qq.com.evil.test/".parse().unwrap()));
     }
 
     #[test]
-    fn candidate_cookie_names_and_domain_filters_are_applied_before_export() {
-        let result = normalize_qq_cookies(&[
-            field("uin", "123456789", ".qq.com"),
-            field("qm_keyst", "fake-key", ".y.qq.com"),
-            field("psrf_qqrefresh_token", "fake-refresh-token", ".qq.com"),
-            field("sessionid", "fake-session", ".qq.com"),
-            field("qqmusic_key", "discarded-key", ".evil.qq.com"),
+    fn sessions_export_first_party_music_cookies_with_both_key_names() {
+        let session = session_from_cookies(&[
+            cookie("uin", "123456789", ".qq.com"),
+            cookie("qm_keyst", "key", ".y.qq.com"),
+            cookie("psrf_qqrefresh_token", "refresh", ".qq.com"),
+            cookie("sessionid", "unrelated", ".qq.com"),
+            cookie("qqmusic_key", "foreign", ".evil.qq.com"),
         ])
-        .expect("valid test candidate");
+        .unwrap();
 
         assert_eq!(
-            result.value,
-            "uin=123456789; qqmusic_key=fake-key; qm_keyst=fake-key; psrf_qqrefresh_token=fake-refresh-token"
+            session.cookie,
+            "uin=123456789; qqmusic_key=key; qm_keyst=key; psrf_qqrefresh_token=refresh"
         );
-        assert!(result.can_refresh);
+        assert!(session.can_refresh);
     }
 
     #[test]
-    fn incomplete_or_malformed_cookies_never_become_candidates() {
-        assert!(normalize_qq_cookies(&[field("uin", "123", ".qq.com")]).is_none());
-        assert!(normalize_qq_cookies(&[
-            field("uin", "o123", ".qq.com"),
-            field("qm_keyst", "fake-key", ".qq.com"),
+    fn incomplete_or_malformed_logins_are_not_sessions() {
+        assert!(session_from_cookies(&[cookie("uin", "123", ".qq.com")]).is_none());
+        assert!(session_from_cookies(&[
+            cookie("uin", "o123", ".qq.com"),
+            cookie("qm_keyst", "key", ".qq.com")
         ])
         .is_none());
-        assert!(normalize_qq_cookies(&[
-            field("uin", "123", ".qq.com"),
-            field("qm_keyst", "fake key", ".qq.com"),
+        assert!(session_from_cookies(&[
+            cookie("uin", "123", ".qq.com"),
+            cookie("qm_keyst", "a key", ".qq.com")
         ])
         .is_none());
     }
 
     #[test]
-    fn only_the_main_window_can_call_the_login_commands() {
-        assert!(is_main_window_label("main"));
-        assert!(!is_main_window_label("qq-music-login-auth"));
-        assert!(!is_main_window_label("lastfm-auth"));
-    }
-
-    #[test]
-    fn non_refresh_cookie_candidates_must_remain_stable() {
-        let started = std::time::Instant::now();
-        let candidate = NormalizedCookie {
-            value: "uin=123456789; qm_keyst=fake-key".to_owned(),
-            can_refresh: false,
-        };
-        let mut previous = None;
-
-        assert!(!candidate_is_ready(&mut previous, &candidate, started));
-        assert!(!candidate_is_ready(
-            &mut previous,
-            &candidate,
-            started + COOKIE_STABILITY_INTERVAL - std::time::Duration::from_millis(1)
-        ));
-        assert!(candidate_is_ready(
-            &mut previous,
-            &candidate,
-            started + COOKIE_STABILITY_INTERVAL
-        ));
-    }
-
-    #[test]
-    fn changed_candidates_restart_stability_and_refresh_tokens_bypass_waiting() {
-        let started = std::time::Instant::now();
-        let mut previous = None;
-        let first = NormalizedCookie {
-            value: "uin=123456789; qm_keyst=first-key".to_owned(),
-            can_refresh: false,
-        };
-        let changed = NormalizedCookie {
-            value: "uin=123456789; qm_keyst=second-key".to_owned(),
-            can_refresh: false,
-        };
-
-        assert!(!candidate_is_ready(&mut previous, &first, started));
-        assert!(!candidate_is_ready(
-            &mut previous,
-            &changed,
-            started + COOKIE_STABILITY_INTERVAL
-        ));
-        assert!(candidate_is_ready(
-            &mut previous,
-            &NormalizedCookie {
-                value: changed.value,
-                can_refresh: true,
-            },
-            started + COOKIE_STABILITY_INTERVAL
-        ));
-    }
-
-    #[test]
-    fn failed_login_window_setup_cancels_the_attempt_and_closes_the_window() {
-        let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let mut closed = false;
-
-        let result = finish_login_setup::<()>(
-            Err("QQ Music login setup timed out".to_owned()),
-            &cancelled,
-            || closed = true,
-        );
-
-        assert_eq!(result, Err("QQ Music login setup timed out".to_owned()));
-        assert!(cancelled.load(std::sync::atomic::Ordering::Acquire));
-        assert!(!is_login_attempt_active(&cancelled));
-        assert!(closed);
-    }
-
-    #[test]
-    fn temporary_profile_cleanup_retries_transient_lock_failures() {
-        let mut attempts = 0;
-        let mut waits = 0;
-        let result = remove_profile_with_retry(
-            || {
-                attempts += 1;
-                if attempts < 3 {
-                    Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
-                } else {
-                    Ok(())
-                }
-            },
-            |_| waits += 1,
-        );
-
-        assert!(result.is_ok());
-        assert_eq!(attempts, 3);
-        assert_eq!(waits, 2);
-    }
-
-    #[test]
-    fn temporary_profile_cleanup_treats_missing_directory_as_success() {
-        let mut attempts = 0;
-        let result = remove_profile_with_retry(
-            || {
-                attempts += 1;
-                Err(std::io::Error::from(std::io::ErrorKind::NotFound))
-            },
-            |_| panic!("missing profile should not be retried"),
-        );
-
-        assert!(result.is_ok());
-        assert_eq!(attempts, 1);
-    }
-
-    #[test]
-    fn temporary_profile_cleanup_bounds_permanent_failures() {
-        let mut attempts = 0;
-        let mut waits = 0;
-        let result = remove_profile_with_retry(
-            || {
-                attempts += 1;
-                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
-            },
-            |_| waits += 1,
-        );
+    fn sessions_without_refresh_tokens_must_settle() {
+        let start = Instant::now();
+        let mut pending = None;
 
         assert_eq!(
-            result.unwrap_err().kind(),
-            std::io::ErrorKind::PermissionDenied
+            settled_cookie(&mut pending, session("a", false), start),
+            None
         );
-        assert_eq!(attempts, PROFILE_CLEANUP_ATTEMPTS);
-        assert_eq!(waits, PROFILE_CLEANUP_ATTEMPTS - 1);
-        assert!(PROFILE_CLEANUP_RETRY_INTERVAL > std::time::Duration::ZERO);
+        assert_eq!(
+            settled_cookie(&mut pending, session("b", false), start + SETTLE_TIME),
+            None
+        );
+        assert_eq!(
+            settled_cookie(
+                &mut pending,
+                session("b", false),
+                start + SETTLE_TIME * 2 - Duration::from_millis(1)
+            ),
+            None
+        );
+        assert_eq!(
+            settled_cookie(&mut pending, session("b", false), start + SETTLE_TIME * 2).as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            settled_cookie(&mut pending, session("c", true), start).as_deref(),
+            Some("c")
+        );
     }
 }
