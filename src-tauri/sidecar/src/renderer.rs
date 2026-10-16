@@ -136,7 +136,15 @@ pub async fn apply_security_headers(request: Request<Body>, next: Next) -> Respo
     response
 }
 
-pub async fn serve_renderer(renderer_dir: PathBuf, request: Request<Body>) -> Response<Body> {
+pub async fn serve_renderer(renderer_dir: PathBuf, mut request: Request<Body>) -> Response<Body> {
+    let path = request.uri().path();
+    let is_document = path.ends_with('/') || path.ends_with(".html");
+    if is_document {
+        // Documents name hashed assets; after switching builds (a rollback
+        // included) a revalidated old document would reference missing files.
+        request.headers_mut().remove(header::IF_MODIFIED_SINCE);
+        request.headers_mut().remove(header::IF_NONE_MATCH);
+    }
     let service = ServiceBuilder::new()
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
@@ -144,7 +152,14 @@ pub async fn serve_renderer(renderer_dir: PathBuf, request: Request<Body>) -> Re
         ))
         .service(ServeDir::new(renderer_dir).append_index_html_on_directories(true));
     match service.oneshot(request).await {
-        Ok(response) => response.map(Body::new),
+        Ok(mut response) => {
+            if is_document {
+                response
+                    .headers_mut()
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            }
+            response.map(Body::new)
+        }
         Err(error) => {
             tracing::warn!("renderer service failed: {error}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -173,6 +188,31 @@ mod tests {
     use tokio::{io::AsyncWriteExt, net::TcpListener, process::Command};
 
     use super::*;
+
+    #[tokio::test]
+    async fn documents_are_never_revalidated_but_hashed_assets_are() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("index.html"), "index").unwrap();
+        std::fs::create_dir(directory.path().join("assets")).unwrap();
+        std::fs::write(directory.path().join("assets/index-abc123.js"), "chunk").unwrap();
+        let serve = |path: &str, if_modified_since: &str| {
+            let request = Request::builder()
+                .uri(path)
+                .header(header::IF_MODIFIED_SINCE, if_modified_since)
+                .body(Body::empty())
+                .unwrap();
+            serve_renderer(directory.path().to_path_buf(), request)
+        };
+        let future = "Fri, 01 Jan 2100 00:00:00 GMT";
+
+        for path in ["/", "/index.html"] {
+            let response = serve(path, future).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
+        let asset = serve("/assets/index-abc123.js", future).await;
+        assert_eq!(asset.status(), StatusCode::NOT_MODIFIED);
+    }
 
     #[derive(Clone)]
     struct CaptureState(Arc<tokio::sync::Mutex<Option<String>>>);
