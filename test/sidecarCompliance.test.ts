@@ -286,7 +286,9 @@ async function createOptionalDependencyFixture(): Promise<{
     `${await readFile(
       path.join(fixture.root, 'src-tauri', 'Cargo.lock'),
       'utf8'
-    )}\n[[package]]\nname = "optional-fixture"\nversion = "1.0.0"\nchecksum = "${'b'.repeat(64)}"\n`,
+    )}\n[[package]]\nname = "optional-fixture"\nversion = "1.0.0"\nchecksum = "${'b'.repeat(
+      64
+    )}"\n`,
     'utf8'
   );
 
@@ -343,7 +345,7 @@ describe('Rust Sidecar copyleft distribution bundle', () => {
       },
     });
 
-    expect(result.dependencyCount).toBe(13);
+    expect(result.dependencyCount).toBe(EXPECTED_UNM_CRATES.length + 1);
     const manifest = JSON.parse(
       await readFile(path.join(outputDirectory, 'SOURCE-MANIFEST.json'), 'utf8')
     ) as {
@@ -406,8 +408,8 @@ describe('Rust Sidecar copyleft distribution bundle', () => {
       skipOfflineRebuild: true,
     });
 
-    expect(result.copyleftSourceCount).toBe(13);
-    expect(result.dependencyCount).toBe(13);
+    expect(result.copyleftSourceCount).toBe(EXPECTED_UNM_CRATES.length + 1);
+    expect(result.dependencyCount).toBe(EXPECTED_UNM_CRATES.length + 1);
     expect(result.completeSourceDirectory).toBe(completeSourceDirectory);
 
     const manifest = JSON.parse(
@@ -437,17 +439,19 @@ describe('Rust Sidecar copyleft distribution bundle', () => {
       'random-string',
       ...EXPECTED_UNM_CRATES,
     ]);
-    expect(manifest.dependencySourcePackages).toHaveLength(13);
+    expect(manifest.dependencySourcePackages).toHaveLength(
+      EXPECTED_UNM_CRATES.length + 1
+    );
     expect(
       manifest.dependencySourcePackages.map(({ name }) => name)
     ).not.toContain('yesplaymusic-core');
     expect(manifest.completeSource).toEqual(
       expect.objectContaining({
-        dependencySourceCount: 13,
+        dependencySourceCount: EXPECTED_UNM_CRATES.length + 1,
         offlineRebuildVerified: false,
       })
     );
-    expect(manifest.dependencyNoticeCount).toBe(13);
+    expect(manifest.dependencyNoticeCount).toBe(EXPECTED_UNM_CRATES.length + 1);
 
     for (const packageName of EXPECTED_UNM_CRATES) {
       const bundledSource = path.join(
@@ -652,8 +656,8 @@ describe('Rust Sidecar copyleft distribution bundle', () => {
       skipOfflineRebuild: true,
     });
 
-    expect(result.copyleftSourceCount).toBe(13);
-    expect(result.dependencyCount).toBe(14);
+    expect(result.copyleftSourceCount).toBe(EXPECTED_UNM_CRATES.length + 1);
+    expect(result.dependencyCount).toBe(EXPECTED_UNM_CRATES.length + 2);
     expect(ypmSourceArchiveName('0.7.0')).toBe(
       'YesPlayMusic_0.7.0_ypm-source.tar.gz'
     );
@@ -680,7 +684,7 @@ describe('Rust Sidecar copyleft distribution bundle', () => {
     expect(manifest.completeSource).toEqual(
       expect.objectContaining({
         assetName: 'YesPlayMusic_0.7.0_ypm-source.tar.gz',
-        dependencySourceCount: 14,
+        dependencySourceCount: EXPECTED_UNM_CRATES.length + 2,
       })
     );
     expect(manifest.copyleftSourcePackages.map(({ name }) => name)).toEqual([

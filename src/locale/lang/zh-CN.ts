@@ -270,6 +270,8 @@ export default {
         qq: 'QQ 引擎的 Cookie',
         desc1: '设置说明请参见此处',
         desc2: '，留空则不进行相关设置',
+        qqQuickLogin: '快速登录',
+        qqQuickLoginFailed: 'QQ 音乐登录失败，请重试',
       },
       ytdl: 'YtDl 引擎要使用的 youtube-dl 可执行文件',
       proxy: {

@@ -272,6 +272,9 @@ export default {
         qq: 'QQ 用の Cookie',
         desc1: '設定方法はこちら。',
         desc2: '空欄なら設定しません。',
+        qqQuickLogin: 'クイックログイン',
+        qqQuickLoginFailed:
+          'QQ Music にログインできませんでした。もう一度お試しください。',
       },
       ytdl: 'YtDl 用の youtube-dl 実行ファイル',
       proxy: {

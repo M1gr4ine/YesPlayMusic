@@ -1,6 +1,8 @@
 //! UNM (UnblockNeteaseMusic) resolution, framework-free.
 //! The Sidecar wraps this in an axum route; the TUI calls it directly.
 
+mod qq;
+
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
@@ -13,7 +15,6 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use futures_util::StreamExt;
 use serde_json::{json, Map, Number, Value};
 use tokio::sync::Semaphore;
-use unm_api_utils::executor::build_full_executor;
 use unm_engine::{
     executor::{EngineId, Executor},
     interface::Engine,
@@ -215,7 +216,7 @@ impl Default for UnmState {
 impl UnmState {
     pub fn new() -> Self {
         Self {
-            executor: Arc::new(build_full_executor()),
+            executor: Arc::new(build_executor()),
             bilibili_client: Arc::new(ReqwestBilibiliClient {
                 client: reqwest::Client::builder()
                     .connect_timeout(Duration::from_secs(10))
@@ -342,6 +343,38 @@ impl UnmState {
         sources.retain(|source| !excluded.contains(source));
         sources
     }
+}
+
+/// The official UNM engines, with our own QQ provider in place of
+/// `unm_engine_qq` (see `qq`).
+fn build_executor() -> Executor {
+    let mut executor = Executor::new();
+    executor.register(
+        Cow::Borrowed(unm_engine_bilibili::ENGINE_ID),
+        Arc::new(unm_engine_bilibili::BilibiliEngine),
+    );
+    executor.register(
+        Cow::Borrowed(unm_engine_kugou::ENGINE_ID),
+        Arc::new(unm_engine_kugou::KugouEngine),
+    );
+    executor.register(
+        Cow::Borrowed(unm_engine_pyncm::ENGINE_ID),
+        Arc::new(unm_engine_pyncm::PyNCMEngine),
+    );
+    executor.register(
+        Cow::Borrowed(unm_engine_ytdl::ENGINE_ID),
+        Arc::new(unm_engine_ytdl::YtDlEngine),
+    );
+    executor.register(
+        Cow::Borrowed(unm_engine_kuwo::ENGINE_ID),
+        Arc::new(unm_engine_kuwo::KuwoEngine),
+    );
+    executor.register(
+        Cow::Borrowed(unm_engine_joox::ENGINE_ID),
+        Arc::new(unm_engine_joox::JooxEngine),
+    );
+    executor.register(Cow::Borrowed(qq::ENGINE_ID), Arc::new(qq::QqEngine::new()));
+    executor
 }
 
 pub async fn run_hermetic_executor_smoke() -> Result<Vec<String>, String> {
@@ -679,6 +712,23 @@ mod tests {
             socket.write_all(b"0\r\n\r\n").await.unwrap();
         });
         (address, task)
+    }
+
+    #[tokio::test]
+    async fn production_executor_uses_our_qq_provider() {
+        let song = SongSearchInformation::builder()
+            .source(Cow::Borrowed("qq"))
+            .identifier("no-separator".to_owned())
+            .build();
+        // Identifier parsing fails before any network access, and the bundled
+        // engine words this error differently.
+        let error = UnmState::new()
+            .executor
+            .retrieve(&song, &Context::default())
+            .await
+            .err()
+            .expect("retrieve should fail");
+        assert!(error.ends_with("QQ identifier is invalid"), "{error}");
     }
 
     #[tokio::test]

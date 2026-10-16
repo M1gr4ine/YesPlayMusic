@@ -37,9 +37,6 @@ tower = { version = "=0.5.3", features = ["util"] }
 tower-http = { version = "=0.6.11", features = ["fs", "set-header"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.20", features = ["env-filter"] }
-unm_api_utils = "=0.4.0"
-unm_engine = "=0.4.0"
-unm_types = "=0.4.0"
 url = "=2.5.8"
 yesplaymusic-core = { path = "../core", features = ["cache"] }
 

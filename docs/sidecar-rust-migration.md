@@ -467,7 +467,7 @@ Sidecar `phys_footprint` 与退出回收记录在
 ## 依赖与许可证决策
 
 - `ncm-api-rs` 锁定确切版本或 commit；不跟随浮动 git HEAD。
-- Rust Sidecar 的 12 个 `unm_* 0.4.0` crates 是 `LGPL-3.0-or-later`；传递闭包 `unm_api_utils → unm_engine_kuwo → random-string 1.1.0` 是 normal dependency，后者声明 `GPL-3.0-only`。项目采用 Sidecar `GPL-3.0-only`、独立 Tauri host `MIT` 的进程分发策略，两边 Cargo metadata 均显式声明对应 license。该策略仍需发布者自行承担最终合规判断，自动测试不能提供法律意见。
+- Rust Sidecar 的 10 个 `unm_* 0.4.0` crates 是 `LGPL-3.0-or-later`；传递闭包 `yesplaymusic-core → unm_engine_kuwo → random-string 1.1.0` 是 normal dependency，后者声明 `GPL-3.0-only`。项目采用 Sidecar `GPL-3.0-only`、独立 Tauri host `MIT` 的进程分发策略，两边 Cargo metadata 均显式声明对应 license。该策略仍需发布者自行承担最终合规判断，自动测试不能提供法律意见。
 - `build-sidecar-compliance.mjs` 先以 release workspace 图给独立 Sidecar resolver 划定上界，再以独立 workspace 实际解析出的非 dev 图作为分发闭包。当前闭包是 354 个 registry 依赖；生成器会随同 application source、精确 vendor source、GPL/LGPL 正文、第三方 notice、校验和、固定工具链和重链接脚本一起写入独立完整源码目录，并在空 `CARGO_HOME`、空 target 目录下完成 `--offline --locked --release` 构建。`.app` 只带轻量 notice、二进制 provenance 和同版本源码下载指引；`dist_tauri/` 另生成完整源码压缩包、SHA-256 及与 DMG 同层的 `SOURCE-OFFER`，tag workflow 的 `release/**/*` 上传规则会把它们放进同一 Release。Windows/Linux 的最终 Installation Information 发布审查仍是 **PENDING**。
 - `build-app-compliance.mjs` 从 `cargo tree -e normal` 构建 target-specific host 闭包，并从最终 Rollup chunks 记录 renderer package。unknown/missing license、越界 symlink 或闭包漂移都会失败。当前 macOS manifest 覆盖 328 个 host package 和 44 个 renderer package，其中 342 项许可证文本来自 package，30 项来自固定 coordinate/repository/VCS/digest 的 curated donor。macOS bundle exact bytes 已通过；NSIS/AppImage/deb extraction gate 已接入 workflow，实际实验分发物仍是 **PENDING**。
 - Sidecar 声明并验证 MSRV 1.89；Tauri host 声明 1.88。两者来自实际锁定依赖闭包，不用低于传递依赖要求的虚假版本。

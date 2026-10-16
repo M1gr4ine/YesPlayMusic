@@ -270,6 +270,8 @@ export default {
         qq: 'Cookie for QQ use',
         desc1: 'Click here for the configuration instruction. ',
         desc2: 'Leave empty to pick up the default value',
+        qqQuickLogin: 'Quick login',
+        qqQuickLoginFailed: 'QQ Music login failed. Please try again.',
       },
       ytdl: 'The youtube-dl Executable File for YtDl',
       proxy: {

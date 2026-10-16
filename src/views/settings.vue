@@ -341,12 +341,19 @@
               {{ $t('settings.unm.cookie.desc2') }}
             </div>
           </div>
-          <div class="right">
+          <div class="right qq-cookie-control">
             <input
               v-model="unmQQCookie"
               class="text-input margin-right-0"
               placeholder="uin=..; qm_keyst=..;"
             />
+            <button
+              v-if="isDesktop && isWindows"
+              :disabled="qqMusicLoginActive"
+              @click="startQQMusicLogin"
+            >
+              {{ $t('settings.unm.cookie.qqQuickLogin') }}
+            </button>
           </div>
         </div>
 
@@ -867,6 +874,7 @@ import {
   installPendingAppUpdate,
 } from '@/services/appUpdater';
 import { syncDesktopSettings } from '@/services/desktopSettings';
+import { openQQMusicLogin } from '@/services/qqMusicLogin';
 import {
   getSharedCacheStatus,
   migrateIndexedDbTracksToSharedCache,
@@ -934,6 +942,7 @@ export default defineComponent({
       lastfmChecker: null as ReturnType<typeof setInterval> | null,
       lastfmAuthorizationCleanup: null as (() => void) | null,
       lastfmAuthorizationEpoch: 0,
+      qqMusicLoginActive: false,
       updaterState: 'idle' as AppUpdaterState,
       updaterVersion: '',
       updaterNotes: '',
@@ -2076,6 +2085,19 @@ export default defineComponent({
       this.lastfmAuthorizationCleanup?.();
       this.lastfmAuthorizationCleanup = null;
     },
+    async startQQMusicLogin() {
+      this.qqMusicLoginActive = true;
+      try {
+        // null: closed, or a login already open (Rust focuses it, no error).
+        const cookie = await openQQMusicLogin();
+        if (cookie !== null) this.unmQQCookie = cookie;
+      } catch (error) {
+        console.warn('[qq-music-login]', error);
+        this.showToast(locale.t('settings.unm.cookie.qqQuickLoginFailed'));
+      } finally {
+        this.qqMusicLoginActive = false;
+      }
+    },
     async sendProxyConfig() {
       if (this.proxyProtocol === 'noProxy') return;
       const config = this.settings.proxyConfig;
@@ -2359,6 +2381,20 @@ button {
 
 input.text-input.margin-right-0 {
   margin-right: 0;
+}
+.qq-cookie-control {
+  display: flex;
+  align-items: center;
+
+  button {
+    white-space: nowrap;
+  }
+
+  button:disabled {
+    cursor: default;
+    opacity: 0.55;
+    transform: none;
+  }
 }
 input.text-input {
   background: var(--color-secondary-bg);

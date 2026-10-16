@@ -46,6 +46,12 @@ futures-lite = "2.6"
 mpris-server = "0.10.0"
 zbus = "5.19.0"
 
+# Async WebView2 cookie reads for the QQ Music login; pinned to the versions
+# wry 0.55 links so the COM interfaces are the same types.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "=0.38.2"
+windows-core = "=0.61.2"
+
 [patch.crates-io]
 tauri-plugin-updater = { path = "patches/tauri-plugin-updater-2.10.1" }
 

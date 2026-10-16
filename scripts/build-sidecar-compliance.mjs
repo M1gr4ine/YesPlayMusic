@@ -41,14 +41,12 @@ export const defaultCompleteSourceOutput = path.join(
 );
 
 export const EXPECTED_UNM_CRATES = Object.freeze([
-  'unm_api_utils',
   'unm_engine',
   'unm_engine_bilibili',
   'unm_engine_joox',
   'unm_engine_kugou',
   'unm_engine_kuwo',
   'unm_engine_pyncm',
-  'unm_engine_qq',
   'unm_engine_ytdl',
   'unm_request',
   'unm_selector',
