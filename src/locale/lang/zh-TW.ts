@@ -219,6 +219,10 @@ export default {
     subTitleDefault: '副標題使用別名',
     enableReversedMode: '啟用倒序播放功能 (實驗性功能)',
     enableCustomTitlebar: '啟用自訂標題列',
+    windowsWindowAnimations: {
+      title: '視窗過渡動畫',
+      description: '小視窗展開時播放過渡動畫。關閉後只淡入淡出。',
+    },
     enableOsdlyricsSupport: {
       title: '桌面歌詞',
       desc: '在 Linux 上將同步歌詞傳送到 OSDLyrics。',

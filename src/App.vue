@@ -5,6 +5,10 @@
       'user-select-none': userSelectNone,
       'window-hidden': windowHidden,
     }"
+    :data-compact-expansion="compactBrowseStage"
+    :data-compact-motion="compactBrowseStage && compactExpansion.motion"
+    :style="compactExpansionStyle"
+    @animationend="handleCompactEnterEnd"
   >
     <Scrollbar
       v-show="!showLyrics"
@@ -49,7 +53,12 @@
       @cancel="cancelCloseChoice"
       @choose="resolveCloseChoice"
     />
-    <transition v-if="enablePlayer" name="slide-up">
+    <transition
+      v-if="enablePlayer"
+      :name="compactBrowseStage === 'hidden' ? 'compact-bar-fade' : 'slide-up'"
+      @after-leave="dispatchCompactExpansion({ type: 'barHidden' })"
+      @after-enter="dispatchCompactExpansion({ type: 'barShown' })"
+    >
       <Lyrics
         v-show="showLyrics"
         @expand-compact-window="expandCompactWindow"
@@ -77,15 +86,34 @@ import { connectDesktopEvents } from '@/services/desktopBridge';
 import { sendDesktop } from '@/services/desktopTransport';
 import { isDesktopRuntime } from '@/utils/runtime';
 import {
+  applyCompactExpansion,
   COMPACT_RESIZE_SETTLE_MS,
-  expandCompactWindow,
   hasRememberedBarFrame,
+  planCompactExpansion,
   rememberCurrentCompactWindowFrame,
   restoreRememberedCompactWindowFrame,
   restoreCompactWindow,
   signalInitialWindowReady,
 } from '@/services/compactWindow';
-import { isBarWindowSize, isMiniWindowSize } from '@/utils/miniWindow';
+import {
+  COMPACT_BAR_FADE_MS,
+  COMPACT_ENTER_MS,
+  compactBrowseStage,
+  compactExpansionDeadline,
+  IDLE_COMPACT_EXPANSION,
+  nextCompactExpansion,
+  resolveAutoLyrics,
+  resolveSettledLyrics,
+  type AutoLyricsAction,
+  type CompactExpansionEffect,
+  type CompactExpansionEvent,
+  type CompactExpansionMotion,
+} from '@/utils/compactExpansion';
+import {
+  isBarWindowSize,
+  isMiniWindowSize,
+  isWindowsTauri,
+} from '@/utils/miniWindow';
 import {
   isEditableShortcutTarget,
   resolveRuntimeShortcutAction,
@@ -132,6 +160,8 @@ export default defineComponent({
       isLastfmCallback: isLastfmCallbackLocation(window.location),
       userSelectNone: false,
       autoOpenedLyrics: false, // Restore lyrics only when compact mode opened it.
+      compactExpansion: IDLE_COMPACT_EXPANSION,
+      compactExpansionDeadline: null as ReturnType<typeof setTimeout> | null,
       compactWindowExpanded:
         !isBarWindowSize({
           width: window.innerWidth,
@@ -172,6 +202,23 @@ export default defineComponent({
     showNavbar() {
       return this.$route.name !== 'lastfmCallback';
     },
+    compactBrowseStage() {
+      return compactBrowseStage(this.compactExpansion);
+    },
+    compactExpansionStyle() {
+      if (!this.compactBrowseStage) return undefined;
+      const { plan, motion } = this.compactExpansion;
+      return {
+        '--compact-enter-from': plan?.origin === 'bottom' ? '1' : '-1',
+        '--compact-enter-duration': `${COMPACT_ENTER_MS[motion]}ms`,
+        '--compact-bar-fade-duration': `${COMPACT_BAR_FADE_MS}ms`,
+      };
+    },
+  },
+  watch: {
+    '$route.name'(name: unknown) {
+      this.dispatchCompactExpansion({ type: 'routeChanged', name });
+    },
   },
   created() {
     if (this.isLastfmCallback) return;
@@ -208,6 +255,7 @@ export default defineComponent({
     window.removeEventListener('keydown', this.handleKeydown);
     window.removeEventListener('resize', this.handleMiniResize);
     if (this.compactResizeTimer !== null) clearTimeout(this.compactResizeTimer);
+    this.clearCompactExpansionDeadline();
     this.visibilityCleanup?.();
     this.desktopEventsCleanup?.then(cleanup => cleanup());
   },
@@ -263,16 +311,131 @@ export default defineComponent({
       this.closePromptVisible = false;
       await sendDesktop('cancelCloseChoice');
     },
-    async expandCompactWindow() {
-      if (!(await expandCompactWindow())) return;
-      this.compactWindowExpanded = true;
-      if (this.$route.name !== 'next') {
-        await this.$router.push({ name: 'next' });
+    expandCompactWindow() {
+      this.dispatchCompactExpansion({
+        type: 'expand',
+        motion: this.compactExpansionMotion(),
+      });
+    },
+    restoreCompactWindow() {
+      this.dispatchCompactExpansion({ type: 'restore' });
+    },
+    compactExpansionMotion(): CompactExpansionMotion {
+      if (!isWindowsTauri) return 'none';
+      const reduced = window.matchMedia(
+        '(prefers-reduced-motion: reduce)'
+      ).matches;
+      return this.settings.windowsWindowAnimations && !reduced
+        ? 'full'
+        : 'fade';
+    },
+    dispatchCompactExpansion(event: CompactExpansionEvent) {
+      const previous = this.compactExpansion;
+      const { state, effects } = nextCompactExpansion(previous, event);
+      this.compactExpansion = state;
+      if (state.phase !== previous.phase) {
+        this.clearCompactExpansionDeadline();
+        const deadline = compactExpansionDeadline(state);
+        if (deadline) {
+          this.compactExpansionDeadline = setTimeout(() => {
+            this.compactExpansionDeadline = null;
+            this.dispatchCompactExpansion(deadline.event);
+          }, deadline.ms);
+        }
+      }
+      for (const effect of effects) {
+        void this.runCompactExpansionEffect(effect);
       }
     },
-    async restoreCompactWindow() {
-      if (!(await restoreCompactWindow())) return;
-      this.compactWindowExpanded = false;
+    async runCompactExpansionEffect(effect: CompactExpansionEffect) {
+      switch (effect) {
+        case 'plan': {
+          const plan = await planCompactExpansion().catch(error => {
+            console.warn('[compact-window] expansion planning failed', error);
+            return null;
+          });
+          this.dispatchCompactExpansion(
+            plan ? { type: 'planned', plan } : { type: 'planFailed' }
+          );
+          return;
+        }
+        case 'hideBar':
+        case 'showBar': {
+          const event = effect === 'hideBar' ? 'barHidden' : 'barShown';
+          // The lyrics transition reports completion via after-leave/enter.
+          if (this.showLyrics === (effect === 'showBar')) {
+            this.dispatchCompactExpansion({ type: event });
+            return;
+          }
+          this.toggleLyrics();
+          return;
+        }
+        case 'resize': {
+          const { plan } = this.compactExpansion;
+          const size = plan
+            ? await applyCompactExpansion(plan).catch(error => {
+                console.warn('[compact-window] expansion failed', error);
+                return null;
+              })
+            : null;
+          this.dispatchCompactExpansion(
+            size ? { type: 'resized', size } : { type: 'resizeFailed' }
+          );
+          return;
+        }
+        case 'showQueue': {
+          // The user asked for the queue, so it replaces the compact lyrics.
+          this.compactWindowExpanded = true;
+          if (this.showLyrics) this.toggleLyrics();
+          this.autoOpenedLyrics = false;
+          if (this.$route.name !== 'next') {
+            await this.$router.push({ name: 'next' }).catch(error => {
+              console.warn('[compact-window] queue navigation failed', error);
+            });
+          }
+          await this.$nextTick();
+          this.dispatchCompactExpansion({
+            type: 'queueShown',
+            onQueue: this.$route.name === 'next',
+          });
+          return;
+        }
+        case 'restore':
+          try {
+            if (await restoreCompactWindow()) {
+              this.compactWindowExpanded = false;
+            }
+          } catch (error) {
+            console.warn('[compact-window] restore failed', error);
+          }
+          this.dispatchCompactExpansion({ type: 'restored' });
+          return;
+        case 'settle':
+          // Reconcile lyrics with the size the expansion left behind. Only a
+          // real resize event may end the queue choice (becameBar).
+          this.applyAutoLyrics(
+            resolveSettledLyrics(
+              this.compactExpansion,
+              { width: window.innerWidth, height: window.innerHeight },
+              { showLyrics: this.showLyrics, autoOpened: this.autoOpenedLyrics }
+            )
+          );
+          return;
+      }
+    },
+    handleCompactEnterEnd(event: AnimationEvent) {
+      if (event.target !== this.$refs['main']) return;
+      this.dispatchCompactExpansion({ type: 'entered' });
+    },
+    clearCompactExpansionDeadline() {
+      if (this.compactExpansionDeadline === null) return;
+      clearTimeout(this.compactExpansionDeadline);
+      this.compactExpansionDeadline = null;
+    },
+    applyAutoLyrics(action: AutoLyricsAction) {
+      if (!action) return;
+      this.toggleLyrics();
+      this.autoOpenedLyrics = action === 'open';
     },
     // Open the lyrics player when the window becomes narrow or short.
     handleMiniResize() {
@@ -280,17 +443,17 @@ export default defineComponent({
         width: window.innerWidth,
         height: window.innerHeight,
       };
-      const isMini = isMiniWindowSize(size);
+      const isBar = isBarWindowSize(size);
       // The Esc pill follows the bar/browse split, not the lyrics routing.
-      this.compactWindowExpanded =
-        !isBarWindowSize(size) && hasRememberedBarFrame();
-      if (isMini && !this.showLyrics) {
-        this.toggleLyrics();
-        this.autoOpenedLyrics = true;
-      } else if (!isMini && this.showLyrics && this.autoOpenedLyrics) {
-        this.toggleLyrics();
-        this.autoOpenedLyrics = false;
-      }
+      this.compactWindowExpanded = !isBar && hasRememberedBarFrame();
+      if (isBar) this.dispatchCompactExpansion({ type: 'becameBar' });
+      this.applyAutoLyrics(
+        resolveAutoLyrics(this.compactExpansion, {
+          isMini: isMiniWindowSize(size),
+          showLyrics: this.showLyrics,
+          autoOpened: this.autoOpenedLyrics,
+        })
+      );
       this.scheduleCompactWindowMemory();
     },
     scheduleCompactWindowMemory() {
@@ -407,5 +570,49 @@ main::-webkit-scrollbar {
 .slide-up-enter-from,
 .slide-up-leave-to {
   transform: translateY(100%);
+}
+
+// Windows compact expansion: the browse view stays hidden while the bar fades
+// and the window resizes, then enters from the edge that stayed put.
+// Invisible or still moving content must not take clicks.
+#app[data-compact-expansion] :is(main, nav, .player) {
+  pointer-events: none;
+}
+
+#app[data-compact-expansion='hidden'] :is(main, nav, .player) {
+  opacity: 0;
+}
+
+#app[data-compact-expansion='entering'] :is(main, nav, .player) {
+  transform-origin: 50% calc(50% + var(--compact-enter-from) * 50%);
+  animation: compact-browse-enter var(--compact-enter-duration)
+    cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+#app[data-compact-expansion='entering'][data-compact-motion='fade']
+  :is(main, nav, .player) {
+  animation-name: compact-browse-fade;
+}
+
+@keyframes compact-browse-enter {
+  from {
+    opacity: 0;
+    transform: translateY(calc(var(--compact-enter-from) * 12px)) scale(0.97);
+  }
+}
+
+@keyframes compact-browse-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+.compact-bar-fade-enter-active,
+.compact-bar-fade-leave-active {
+  transition: opacity var(--compact-bar-fade-duration) ease-out;
+}
+.compact-bar-fade-enter-from,
+.compact-bar-fade-leave-to {
+  opacity: 0;
 }
 </style>

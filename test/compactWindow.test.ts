@@ -1,11 +1,15 @@
-import { expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import {
   buildCompactWindowTransitionFrame,
   COMPACT_RESIZE_SETTLE_MS,
+  chooseCompactExpansionOrigin,
   isCompactWindowPhysicalSize,
   loadCompactWindowMemory,
+  placeCompactExpansionFrame,
   rememberCompactWindowFrame,
+  type CompactMonitor,
+  type CompactWindowFrame,
 } from '../src/services/compactWindow';
 import { createMemoryStorage } from './helpers/memoryStorage';
 
@@ -177,4 +181,98 @@ test('Windows 和 Linux 从 mini bar 展开时先退出最大化且不记忆全�
     'if (!frame || !snapshot.normal) return null'
   );
   expect(compactWindow).toContain('await window.setFullscreen(false)');
+});
+
+describe('Windows 从播放条展开的窗口位置', () => {
+  const browse = { x: null, y: null, width: 920, height: 620 };
+  const screen = (
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    scaleFactor = 1
+  ): CompactMonitor => ({
+    workArea: { position: { x, y }, size: { width, height } },
+    scaleFactor,
+  });
+  const bar = (x: number, y: number) => ({ x, y, width: 520, height: 80 });
+  const desktop = screen(0, 0, 1920, 1040);
+  // Planning chooses the direction once; resizing places the frame with it.
+  const fit = (
+    current: CompactWindowFrame,
+    target: CompactWindowFrame,
+    monitor: CompactMonitor
+  ) => {
+    const origin = chooseCompactExpansionOrigin(current, monitor);
+    return {
+      frame: placeCompactExpansionFrame(current, target, monitor, origin),
+      origin,
+    };
+  };
+
+  test('播放条在上半屏时向下展开', () => {
+    expect(fit(bar(100, 120), browse, desktop)).toEqual({
+      frame: { x: 100, y: 120, width: 920, height: 620 },
+      origin: 'top',
+    });
+  });
+
+  test('播放条在下半屏时向上展开，底边保持不动', () => {
+    expect(fit(bar(100, 900), browse, desktop)).toEqual({
+      frame: { x: 100, y: 360, width: 920, height: 620 },
+      origin: 'bottom',
+    });
+  });
+
+  test('副屏负坐标和 1.5 倍缩放按物理像素换算', () => {
+    expect(
+      fit(bar(-500, 1300), browse, screen(-2560, 40, 2560, 1400, 1.5))
+    ).toEqual({
+      frame: { x: -1380, y: 490, width: 920, height: 620 },
+      origin: 'bottom',
+    });
+  });
+
+  test('浏览尺寸超过工作区时缩进工作区', () => {
+    expect(
+      fit(
+        bar(800, 650),
+        { x: null, y: null, width: 1600, height: 1200 },
+        screen(0, 0, 1280, 720)
+      )
+    ).toEqual({
+      frame: { x: 0, y: 0, width: 1280, height: 720 },
+      origin: 'bottom',
+    });
+  });
+
+  test('中心正好压在中线时向上展开，差 1px 则向下', () => {
+    // Center 520 sits exactly on the 1040px work area's midline.
+    expect(chooseCompactExpansionOrigin(bar(100, 480), desktop)).toBe('bottom');
+    expect(chooseCompactExpansionOrigin(bar(100, 479), desktop)).toBe('top');
+  });
+
+  test('靠右边缘的播放条展开后不越出工作区', () => {
+    expect(fit(bar(1500, 120), browse, desktop).frame).toEqual({
+      x: 1000,
+      y: 120,
+      width: 920,
+      height: 620,
+    });
+  });
+
+  test('夹紧把窗口往上推时，展开方向仍以中线判断为准', () => {
+    // Growing down from y=440 overflows, so the frame is pushed up to 420.
+    expect(fit(bar(100, 440), browse, desktop)).toEqual({
+      frame: { x: 100, y: 420, width: 920, height: 620 },
+      origin: 'top',
+    });
+  });
+
+  test('淡出期间拖动了播放条，按新位置摆放，只沿用规划好的方向', () => {
+    const planned = chooseCompactExpansionOrigin(bar(100, 900), desktop);
+    expect(
+      placeCompactExpansionFrame(bar(300, 700), browse, desktop, planned)
+    ).toEqual({ x: 300, y: 160, width: 920, height: 620 });
+  });
 });

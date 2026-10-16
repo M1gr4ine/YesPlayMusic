@@ -218,6 +218,11 @@ export default {
     subTitleDefault: 'Show Alias for Subtitle by default',
     enableReversedMode: 'Enable Reversed Mode (Experimental)',
     enableCustomTitlebar: 'Enable custom title bar',
+    windowsWindowAnimations: {
+      title: 'Window transitions',
+      description:
+        'Animate the mini player when it expands. When off, it only fades.',
+    },
     enableOsdlyricsSupport: {
       title: 'desktop lyrics',
       desc: 'Send synced lyrics to OSDLyrics on Linux.',

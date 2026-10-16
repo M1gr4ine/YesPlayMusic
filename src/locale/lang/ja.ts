@@ -220,6 +220,11 @@ export default {
     subTitleDefault: 'サブタイトルに別名を表示',
     enableReversedMode: '逆順再生を有効にする（実験的機能）',
     enableCustomTitlebar: 'カスタムタイトルバーを使う',
+    windowsWindowAnimations: {
+      title: 'ウィンドウのトランジション',
+      description:
+        'ミニプレーヤーの展開時にアニメーションします。オフにするとフェードのみになります。',
+    },
     enableOsdlyricsSupport: {
       title: 'デスクトップ歌詞',
       desc: 'Linux で OSDLyrics に同期歌詞を送ります。',

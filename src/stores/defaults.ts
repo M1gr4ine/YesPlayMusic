@@ -34,6 +34,7 @@ const settings = {
   showLibraryDefault: false,
   subTitleDefault: false,
   linuxEnableCustomTitlebar: false,
+  windowsWindowAnimations: true,
   trayIconTheme: 'auto',
   enabledPlaylistCategories,
   proxyConfig: {

@@ -1,7 +1,14 @@
+import { isWindows } from '@/utils/platform';
+import { isTauriRuntime } from '@/utils/runtime';
+
+// The Windows shell locks mini-player text and stages compact expansion.
+export const isWindowsTauri = isWindows && isTauriRuntime;
+
 // Only these mini-player elements keep their native pointer behavior.
-// .mini-copyable wraps text tightly so only the text remains selectable.
+// .mini-copyable wraps text tightly so only the text remains selectable;
+// a text-locked player treats that text as blank, draggable space.
 export const MINI_WINDOW_INTERACTIVE_SELECTOR = [
-  '.mini-copyable',
+  '.mini-player:not(.mini-text-locked) .mini-copyable',
   '.mini-controls',
   '.mini-progress-track',
   'button',

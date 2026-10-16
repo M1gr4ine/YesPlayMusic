@@ -5,6 +5,7 @@ import {
   beginMiniWindowDragGesture,
   hasCrossedMiniWindowDragThreshold,
   isBarWindowSize,
+  isMiniWindowInteractiveTarget,
   isMiniWindowSize,
   shouldStartMiniWindowDrag,
   shouldToggleMiniWindow,
@@ -23,6 +24,45 @@ function targetMatching(selector: string | null = null): EventTarget {
     },
   });
 }
+
+// Bun's HTML engine evaluates the real selector, :not() included. The player
+// itself never matches, so a hit means the text is interactive.
+async function copyableText(playerClass: string): Promise<EventTarget> {
+  let interactive = false;
+  await new HTMLRewriter()
+    .on(MINI_WINDOW_INTERACTIVE_SELECTOR, {
+      element() {
+        interactive = true;
+      },
+    })
+    .transform(
+      new Response(
+        `<div class="${playerClass}"><span class="mini-copyable">歌名</span></div>`
+      )
+    )
+    .text();
+  return targetMatching(interactive ? '.mini-copyable' : null);
+}
+
+describe('Windows 小窗文字锁定', () => {
+  test('默认模式下文字保留选取，不拖窗也不展开', async () => {
+    const text = await copyableText('mini-player');
+    expect(isMiniWindowInteractiveTarget(text)).toBe(true);
+    expect(
+      shouldStartMiniWindowDrag({ button: 0, detail: 1, target: text })
+    ).toBe(false);
+    expect(shouldToggleMiniWindow({ button: 0, target: text })).toBe(false);
+  });
+
+  test('锁定后文字像空白一样拖窗和双击展开', async () => {
+    const text = await copyableText('mini-player mini-text-locked');
+    expect(isMiniWindowInteractiveTarget(text)).toBe(false);
+    expect(
+      shouldStartMiniWindowDrag({ button: 0, detail: 1, target: text })
+    ).toBe(true);
+    expect(shouldToggleMiniWindow({ button: 0, target: text })).toBe(true);
+  });
+});
 
 describe('迷你窗口拖拽边界', () => {
   test('封面和空白区允许拖动窗口', () => {

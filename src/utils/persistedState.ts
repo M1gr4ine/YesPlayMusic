@@ -280,6 +280,10 @@ export function decodeSettingsState(
       stored['linuxEnableCustomTitlebar'],
       defaults.linuxEnableCustomTitlebar
     ),
+    windowsWindowAnimations: booleanValue(
+      stored['windowsWindowAnimations'],
+      defaults.windowsWindowAnimations
+    ),
     trayIconTheme:
       stored['trayIconTheme'] === 'auto' ||
       stored['trayIconTheme'] === 'light' ||

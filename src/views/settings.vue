@@ -437,6 +437,28 @@
         </div>
       </div>
 
+      <div v-if="isDesktop && isWindows" class="item">
+        <div class="left">
+          <div class="title">
+            {{ $t('settings.windowsWindowAnimations.title') }}
+          </div>
+          <div class="description">
+            {{ $t('settings.windowsWindowAnimations.description') }}
+          </div>
+        </div>
+        <div class="right">
+          <div class="toggle">
+            <input
+              id="windows-window-animations"
+              v-model="windowsWindowAnimations"
+              type="checkbox"
+              name="windows-window-animations"
+            />
+            <label for="windows-window-animations"></label>
+          </div>
+        </div>
+      </div>
+
       <div v-if="isDesktop && isLinux" class="item">
         <div class="left">
           <div class="title"> {{ $t('settings.enableCustomTitlebar') }} </div>
@@ -822,6 +844,7 @@ import { stopInterval } from '@/utils/mediaLifecycle';
 import {
   isLinux as platformIsLinux,
   isMac as platformIsMac,
+  isWindows as platformIsWindows,
 } from '@/utils/platform';
 import pkg from '../../package.json';
 import locale from '@/locale';
@@ -1117,6 +1140,9 @@ export default defineComponent({
     },
     isLinux() {
       return platformIsLinux;
+    },
+    isWindows() {
+      return platformIsWindows;
     },
     version() {
       return pkg.version;
@@ -1756,6 +1782,14 @@ export default defineComponent({
           key: 'unmYtDlExe',
           value: value || undefined,
         });
+      },
+    },
+    windowsWindowAnimations: {
+      get() {
+        return this.settings.windowsWindowAnimations;
+      },
+      set(value: boolean) {
+        this.updateSettings({ key: 'windowsWindowAnimations', value });
       },
     },
     enableCustomTitlebar: {

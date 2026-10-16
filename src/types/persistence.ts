@@ -40,6 +40,7 @@ export interface SettingsState {
   showLibraryDefault: boolean;
   subTitleDefault: boolean;
   linuxEnableCustomTitlebar: boolean;
+  windowsWindowAnimations: boolean;
   trayIconTheme: 'auto' | 'light' | 'dark';
   enabledPlaylistCategories: string[];
   proxyConfig: ProxyConfig;

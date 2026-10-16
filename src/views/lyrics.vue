@@ -39,6 +39,7 @@
       <div
         v-if="isMini"
         class="mini-player"
+        :class="{ 'mini-text-locked': miniTextLocked }"
         @mouseenter="setWindowButtons(true)"
         @mouseleave="handleMiniMouseLeave"
         @mousedown="handleMiniMouseDown"
@@ -447,6 +448,7 @@ import {
   beginMiniWindowDragGesture,
   hasCrossedMiniWindowDragThreshold,
   isBarWindowSize,
+  isWindowsTauri,
   shouldToggleMiniWindow,
 } from '@/utils/miniWindow';
 import { ARTWORK_SIZE, buildArtworkURL } from '@/utils/artwork';
@@ -533,6 +535,10 @@ export default defineComponent({
   },
   computed: {
     ...mapState(useAppStore, ['player', 'settings', 'showLyrics', 'data']),
+    // Windows mini text drags and expands the window like blank space.
+    miniTextLocked() {
+      return isWindowsTauri;
+    },
     activeLyricIndex() {
       if (this.miniSeekDragging && typeof this.miniSeekPreview === 'number') {
         return findActiveLyricIndex(this.lyricToShow, this.miniSeekPreview);
@@ -1141,6 +1147,11 @@ export default defineComponent({
     // Keep selectable text above the progress hit area.
     position: relative;
     z-index: 2;
+  }
+
+  &.mini-text-locked .mini-copyable {
+    user-select: none;
+    cursor: inherit;
   }
 
   // Shrink with the window height.
