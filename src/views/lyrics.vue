@@ -54,8 +54,12 @@
             <span class="mini-copyable">{{ artist.name }}</span>
           </div>
         </div>
-        <div class="mini-lyric" :title="displayLyric">
-          <div class="mini-lyric-origin" :style="lyricFontSize">
+        <div
+          class="mini-lyric"
+          :class="{ placeholder: noLyric }"
+          :title="displayLyric"
+        >
+          <div class="mini-lyric-origin" :style="miniLyricFontSize">
             <span class="mini-copyable">{{ displayLyric }}</span>
           </div>
           <div v-if="showMiniTranslation" class="mini-lyric-translation">
@@ -623,6 +627,11 @@ export default defineComponent({
         fontSize: `${this.settings.lyricFontSize || 28}px`,
       };
     },
+    miniLyricFontSize() {
+      return {
+        '--mini-lyric-size': `${this.settings.lyricFontSize || 28}px`,
+      };
+    },
     noLyric() {
       return hasNoLyric(this.lyric.length, this.lyricLoading);
     },
@@ -1112,6 +1121,7 @@ export default defineComponent({
   right: 0;
   bottom: 0;
   left: 0;
+  container-type: size;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1145,9 +1155,10 @@ export default defineComponent({
     -webkit-user-drag: none;
   }
 
-  // Keep long titles from crowding lyrics.
+  // Size to the title, capped; titles give way to lyrics when narrow.
   .mini-info {
-    flex: 0 0 168px;
+    flex: 0 1 auto;
+    max-width: 168px;
     min-width: 0;
   }
 
@@ -1170,14 +1181,21 @@ export default defineComponent({
     text-overflow: ellipsis;
   }
 
-  // Match the full lyrics view font size.
   .mini-lyric {
     flex: 1;
-    min-width: 0;
+    min-width: 30%;
     text-align: center;
     color: var(--color-text);
 
+    // The instrumental placeholder says less than the title, so it yields.
+    &.placeholder {
+      min-width: 0;
+    }
+
+    // Match the full lyrics view size, shrinking only when the bar is too
+    // short or narrow to fit it.
     .mini-lyric-origin {
+      font-size: min(var(--mini-lyric-size), 34cqh, 4.5cqw);
       font-weight: 600;
       line-height: 1.2;
       white-space: nowrap;
