@@ -151,8 +151,9 @@
         </div>
       </div>
 
-      <div v-if="!isMini" class="left-side">
-        <div>
+      <!-- Layout containers drag the window from their blank space. -->
+      <div v-if="!isMini" data-tauri-drag-region class="left-side">
+        <div data-tauri-drag-region>
           <div v-if="settings.showLyricsTime" class="date">
             {{ date }}
           </div>
@@ -165,8 +166,8 @@
               ></div>
             </div>
           </div>
-          <div class="controls">
-            <div class="top-part">
+          <div data-tauri-drag-region class="controls">
+            <div data-tauri-drag-region class="top-part">
               <div class="track-info">
                 <div class="title" :title="currentTrack.name">
                   <router-link
@@ -264,7 +265,7 @@
               </div>
               <span>{{ formatTrackTime(player.currentTrackDuration) }}</span>
             </div>
-            <div class="media-controls">
+            <div data-tauri-drag-region class="media-controls">
               <button-icon
                 v-show="!player.isPersonalFM"
                 :title="
@@ -284,7 +285,7 @@
                   icon-class="repeat-1"
                 />
               </button-icon>
-              <div class="middle">
+              <div data-tauri-drag-region class="middle">
                 <button-icon
                   v-show="!player.isPersonalFM"
                   :title="$t('player.previous')"
@@ -344,7 +345,7 @@
           </div>
         </div>
       </div>
-      <div v-if="!isMini" class="right-side">
+      <div v-if="!isMini" data-tauri-drag-region class="right-side">
         <transition name="slide-fade">
           <div
             v-show="!noLyric"
@@ -1754,12 +1755,16 @@ export default defineComponent({
     overflow-y: auto;
     transition: 0.5s;
     scrollbar-width: none; // firefox
+    // macOS can't start a window drag inside a scroller, so blank space
+    // falls through to .right-side; lines still catch clicks and wheel.
+    pointer-events: none;
 
     .line {
       margin: 2px 0;
       padding: 12px 18px;
       transition: 0.5s;
       border-radius: 12px;
+      pointer-events: auto;
 
       &:hover {
         background: var(--color-secondary-bg-for-transparent);
