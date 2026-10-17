@@ -273,25 +273,37 @@ impl UnmState {
             return Ok(None);
         }
 
+        // Misses are routine; a match that cannot be played is worth a warning.
         let resolution = async {
-            let matched = self
+            let matched = match self
                 .executor
                 .search(&sources, &track, &parsed_context.context)
                 .await
-                .ok()?;
-            let retrieved = self
+            {
+                Ok(matched) => matched,
+                Err(error) => {
+                    tracing::debug!(track = %track.id, %error, "UNM found no match");
+                    return None;
+                }
+            };
+            match self
                 .executor
                 .retrieve(&matched, &parsed_context.context)
                 .await
-                .ok()?;
-
-            Some(retrieved)
+            {
+                Ok(retrieved) => Some(retrieved),
+                Err(error) => {
+                    tracing::warn!(track = %track.id, source = %matched.source, %error, "UNM match is not playable");
+                    None
+                }
+            }
         };
 
-        let Some(mut retrieved) = tokio::time::timeout(self.provider_timeout, resolution)
-            .await
-            .unwrap_or(None)
-        else {
+        let Ok(resolved) = tokio::time::timeout(self.provider_timeout, resolution).await else {
+            tracing::warn!(track = %track.id, "UNM resolution timed out");
+            return Ok(None);
+        };
+        let Some(mut retrieved) = resolved else {
             return Ok(None);
         };
         if retrieved.url.contains("bilivideo.com") {

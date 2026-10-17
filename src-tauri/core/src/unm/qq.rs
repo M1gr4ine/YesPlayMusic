@@ -22,6 +22,9 @@ const COOKIE_CONFIG_KEY: &str = "qq:cookie";
 const IDENTIFIER_SEPARATOR: &str = ":::";
 /// Same window as `unm_selector::SimilarSongSelector`.
 const DURATION_TOLERANCE_MS: i64 = 5_000;
+/// What QQ answers for every file when the request leaves from outside
+/// mainland China, free songs included.
+const RESULT_REGION_LOCKED: i64 = 104_003;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 // Header values the bundled `unm_request` client sends.
 const USER_AGENT_VALUE: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/66.0.3359.181 Safari/537.36";
@@ -123,8 +126,7 @@ impl Engine for QqEngine {
         let filenames = candidate_filenames(media_mid, credentials.logged_in, context.enable_flac);
         let request = vkey_request(&filenames, song_mid, credentials.uin, &random_guid());
         let response = self.call(&request, context).await?;
-        let url = playable_url(&response, &filenames)
-            .ok_or_else(|| anyhow!("QQ returned no playable URL"))?;
+        let url = playable_url(&response, &filenames).ok_or_else(|| refusal(&response))?;
         Ok(RetrievedSongInfo::builder()
             .source(Cow::Borrowed(ENGINE_ID))
             .url(url)
@@ -324,6 +326,31 @@ fn playable_url(response: &Value, filenames: &[String]) -> Option<String> {
     ))
 }
 
+/// Names the `result` codes QQ attached to the files it refused.
+fn refusal(response: &Value) -> anyhow::Error {
+    let mut codes: Vec<i64> = response
+        .pointer("/req_0/data/midurlinfo")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|info| info.get("result").and_then(Value::as_i64))
+        .filter(|code| *code != 0)
+        .collect();
+    codes.sort_unstable();
+    codes.dedup();
+    match codes.as_slice() {
+        [] => anyhow!("QQ returned no playable URL"),
+        [RESULT_REGION_LOCKED] => anyhow!(
+            "QQ returned no playable URL (result 104003: region or license lock, \
+             e.g. an IP outside mainland China)"
+        ),
+        _ => {
+            let codes: Vec<String> = codes.iter().map(i64::to_string).collect();
+            anyhow!("QQ returned no playable URL (result {})", codes.join(", "))
+        }
+    }
+}
+
 fn non_empty_str(value: Option<&Value>) -> Option<&str> {
     value?.as_str().filter(|text| !text.is_empty())
 }
@@ -500,6 +527,19 @@ mod tests {
             .err()
             .expect("retrieve should fail");
         assert_eq!(error.to_string(), "QQ returned no playable URL");
+    }
+
+    #[test]
+    fn refusals_name_the_result_codes() {
+        let refused = |results: &[i64]| {
+            let infos: Vec<Value> = results
+                .iter()
+                .map(|result| json!({ "filename": "f", "purl": "", "result": result }))
+                .collect();
+            refusal(&json!({ "req_0": { "data": { "midurlinfo": infos } } })).to_string()
+        };
+        assert!(refused(&[104_003, 104_003]).contains("result 104003: region or license lock"));
+        assert!(refused(&[104_013, 0, 104_003]).ends_with("(result 104003, 104013)"));
     }
 
     #[test]
