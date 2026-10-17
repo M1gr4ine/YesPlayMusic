@@ -210,7 +210,7 @@ stable 更新，canary 只接收 canary 更新；更新包使用 Tauri Minisign 
 
 ## 自己构建
 
-需要 [Bun 1.3.12](https://bun.sh)、Rust 1.89 以上，以及对应平台的 Tauri 系统依赖。
+需要 [Bun 1.4.3](https://bun.sh)、Rust 1.89 以上，以及对应平台的 Tauri 系统依赖。
 
 ```bash
 cp .env.example .env   # 推荐：启用 Last.fm 等完整本地配置

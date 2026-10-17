@@ -1,4 +1,4 @@
-FROM oven/bun:1.3.12-alpine AS build
+FROM oven/bun:1.4.3-alpine AS build
 ENV VUE_APP_NETEASE_API_URL=/api
 WORKDIR /app
 COPY package.json bun.lock ./
