@@ -1856,13 +1856,155 @@ export default defineComponent({
   }
 }
 
+// Portrait: compact header above the lyrics instead of side by side.
 @media (max-aspect-ratio: 10/9) {
-  .left-side {
-    display: none;
+  .lyrics-page {
+    flex-direction: column;
   }
 
-  .right-side .lyrics-container {
-    max-width: 100%;
+  .left-side {
+    flex: 0 0 auto;
+    justify-content: center;
+    align-items: stretch;
+    margin: 0;
+    // Clear the corner buttons and the window controls.
+    padding: 76px 24px 8px;
+
+    // Grid over the existing markup: cover | info, then progress, then transport.
+    > div {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      column-gap: 16px;
+      align-items: center;
+      width: 100%;
+      max-width: 560px;
+    }
+
+    .date {
+      display: none;
+    }
+
+    .controls {
+      display: contents;
+
+      .title {
+        margin-top: 0;
+      }
+
+      .top-part {
+        grid-column: 2;
+        align-items: center;
+        min-width: 0;
+
+        .track-info {
+          min-width: 0;
+        }
+
+        .top-right .volume-control {
+          display: none;
+        }
+      }
+
+      .progress-bar {
+        grid-column: 1 / -1;
+        margin-top: 14px;
+      }
+
+      .media-controls {
+        grid-column: 1 / -1;
+        margin-top: 4px;
+      }
+    }
+  }
+
+  .left-side .cover {
+    grid-row: 1;
+
+    img,
+    .shadow {
+      width: clamp(72px, 22vw, 112px);
+      height: clamp(72px, 22vw, 112px);
+    }
+
+    .shadow {
+      top: 6px;
+      filter: blur(10px) opacity(0.6);
+    }
+  }
+
+  .right-side {
+    flex: 1 1 auto;
+    min-height: 0;
+    margin: 0 24px;
+
+    .lyrics-container {
+      max-width: 560px;
+      margin: 0 auto;
+      padding-left: 0;
+      // Fade lines out under the header.
+      mask-image: linear-gradient(transparent, #000 48px);
+    }
+
+    // Center within the space left under the header.
+    .lyrics-container .line:first-child {
+      margin-top: calc(50vh - 140px);
+    }
+
+    .lyrics-container .line:last-child {
+      margin-bottom: calc(50vh - 140px);
+    }
+  }
+
+  // Without lyrics, the header becomes a centered, larger now-playing card.
+  .lyrics-page.no-lyric {
+    .left-side {
+      flex: 1 1 auto;
+      transform: none;
+      align-items: center;
+      padding-bottom: 24px;
+
+      > div {
+        grid-template-columns: minmax(0, 1fr);
+        justify-items: center;
+        max-width: min(78vw, 46vh);
+      }
+
+      .date {
+        display: -webkit-box;
+        margin: 0 0 16px;
+        font-size: 2.6rem;
+      }
+
+      .cover {
+        grid-row: auto;
+      }
+
+      .cover img,
+      .cover .shadow {
+        width: min(78vw, 46vh);
+        height: min(78vw, 46vh);
+      }
+
+      .cover .shadow {
+        top: 12px;
+        filter: blur(16px) opacity(0.6);
+      }
+
+      .controls .top-part {
+        grid-column: 1;
+        grid-row: auto;
+        width: 100%;
+        margin-top: 24px;
+      }
+
+      .controls .progress-bar {
+        width: 100%;
+      }
+    }
+
+    .right-side {
+      display: none;
+    }
   }
 }
 
