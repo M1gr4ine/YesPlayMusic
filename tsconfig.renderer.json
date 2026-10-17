@@ -5,6 +5,7 @@
   },
   "include": [
     "src/main.ts",
+    "src/taskbarOverlayMain.ts",
     "src/**/*.vue",
     "src/env.d.ts",
     "src/types/**/*.d.ts"

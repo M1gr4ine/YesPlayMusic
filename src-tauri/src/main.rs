@@ -11,6 +11,9 @@ mod linux_media;
 #[cfg(target_os = "macos")]
 mod macos_media_controls;
 mod qq_music_login;
+mod taskbar_docking;
+#[cfg(windows)]
+mod win32;
 mod window_preferences;
 
 use std::{
@@ -975,11 +978,42 @@ fn update_desktop_preferences(app: &AppHandle, payload: &serde_json::Value) -> R
         let system_theme = window.theme().map_err(|error| error.to_string())?;
         update_tray_icon(app, system_theme)?;
     }
+    #[cfg(windows)]
+    if let Some(docking) = taskbar_docking_controller(app) {
+        docking.settings(
+            preferences.windows_taskbar_docking,
+            preferences.windows_window_animations,
+            preferences.system_reduced_motion,
+        );
+    }
     Ok(())
+}
+
+#[cfg(windows)]
+fn taskbar_docking_controller(
+    app: &AppHandle,
+) -> Option<tauri::State<'_, taskbar_docking::Controller>> {
+    app.try_state()
+}
+
+/// Minimize while docked hides the strip; the player itself is already hidden.
+fn minimize_main_window(app: &AppHandle, window: &WebviewWindow) -> Result<(), String> {
+    #[cfg(windows)]
+    if let Some(docking) = taskbar_docking_controller(app).filter(|docking| docking.is_docked()) {
+        docking.hide_requested();
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    let _ = app;
+    window.minimize().map_err(|error| error.to_string())
 }
 
 fn hide_main_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
+        #[cfg(windows)]
+        if let Some(docking) = taskbar_docking_controller(app) {
+            docking.hide_requested();
+        }
         window.hide().map_err(|error| error.to_string())?;
         render_tray_title(app)?;
     }
@@ -1008,6 +1042,12 @@ fn hide_main_window_or_exit(app: &AppHandle) -> Result<(), String> {
 
 fn show_main_window(app: &AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") {
+        // A docked player shows its taskbar strip instead; the strip undocks
+        // on its own when the taskbar can no longer hold it.
+        #[cfg(windows)]
+        if taskbar_docking_controller(app).is_some_and(|docking| docking.show_requested()) {
+            return render_tray_title(app);
+        }
         if window.is_minimized().map_err(|error| error.to_string())? {
             window.unminimize().map_err(|error| error.to_string())?;
         }
@@ -1568,7 +1608,24 @@ fn desktop_event(
         }
         "minimize" => {
             if let Some(window) = app.get_webview_window("main") {
-                window.minimize().map_err(|error| error.to_string())?;
+                minimize_main_window(&app, &window)?;
+            }
+        }
+        "taskbarDocking" => {
+            let action = payload
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "taskbarDocking payload needs an action".to_string())?;
+            if !matches!(action, "undock" | "hide" | "stripReady") {
+                return Err(format!("unknown taskbar docking action: {action}"));
+            }
+            #[cfg(windows)]
+            if let Some(docking) = taskbar_docking_controller(&app) {
+                match action {
+                    "undock" => docking.undock(),
+                    "hide" => docking.hide_requested(),
+                    _ => docking.strip_ready(),
+                }
             }
         }
         "maximizeOrUnmaximize" => {
@@ -1853,23 +1910,59 @@ fn restore_compact_window(
     if window.is_maximized().map_err(|error| error.to_string())? {
         window.unmaximize().map_err(|error| error.to_string())?;
     }
-    window
-        .set_size(LogicalSize::new(width, height))
-        .map_err(|error| error.to_string())?;
-    let restored_size = window.outer_size().map_err(|error| error.to_string())?;
+    #[cfg(windows)]
+    if let Some(docking) = taskbar_docking_controller(window.app_handle()) {
+        docking.detach();
+    }
+    // Judge the target frame before touching the window: the outer frame is
+    // the logical size scaled plus whatever chrome the current frame carries.
+    let scale = window.scale_factor().map_err(|error| error.to_string())?;
+    let outer = window.outer_size().map_err(|error| error.to_string())?;
+    let inner = window.inner_size().map_err(|error| error.to_string())?;
+    let physical = |logical: f64, frame: u32, client: u32| {
+        (logical * scale).round() as u32 + frame.saturating_sub(client)
+    };
+    let target = (
+        physical(width, outer.width, inner.width),
+        physical(height, outer.height, inner.height),
+    );
     let monitors = monitor_work_areas(&window)?;
-    let reachable = x.zip(y).map(|(x, y)| {
-        window_frame_has_reachable_area(
-            (x, y, restored_size.width, restored_size.height),
-            &monitors,
-        )
-    });
-    if let Some((x, y)) = x.zip(y).filter(|_| reachable == Some(true)) {
-        window
-            .set_position(PhysicalPosition::new(x, y))
-            .map_err(|error| error.to_string())?;
-    } else {
-        window.center().map_err(|error| error.to_string())?;
+    let reachable = x
+        .zip(y)
+        .filter(|&(x, y)| window_frame_has_reachable_area((x, y, target.0, target.1), &monitors));
+    match reachable {
+        #[cfg(windows)]
+        Some((x, y)) => {
+            // One SetWindowPos: separate size and move calls show the window
+            // growing downward and then jumping when it expands upward.
+            let dimension = |value: u32| i32::try_from(value).map_err(|error| error.to_string());
+            win32::place_window(&window, x, y, dimension(target.0)?, dimension(target.1)?)?;
+        }
+        #[cfg(not(windows))]
+        Some((x, y)) => {
+            let current = window.outer_position().map_err(|error| error.to_string())?;
+            let size = LogicalSize::new(width, height);
+            let position = PhysicalPosition::new(x, y);
+            // Growing upward: move first so the top edge lands before the
+            // frame grows into it.
+            if y < current.y {
+                window
+                    .set_position(position)
+                    .map_err(|error| error.to_string())?;
+                window.set_size(size).map_err(|error| error.to_string())?;
+            } else {
+                window.set_size(size).map_err(|error| error.to_string())?;
+                window
+                    .set_position(position)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        None => {
+            window
+                .set_size(LogicalSize::new(width, height))
+                .map_err(|error| error.to_string())?;
+            window.center().map_err(|error| error.to_string())?;
+        }
     }
     Ok(())
 }
@@ -2553,10 +2646,26 @@ fn create_main_window(
     ensure_main_window_reachable(&window)?;
     persist_current_window_position(app.handle())?;
     apply_always_on_top(&window, preferences.always_on_top)?;
+    #[cfg(windows)]
+    {
+        let docking = taskbar_docking::Controller::new(
+            app.handle().clone(),
+            Box::new(move |app| build_taskbar_overlay(app, port, proxy_relay_enabled)),
+        );
+        // Docking is a convenience: a failed hook leaves the bar floating.
+        if let Err(error) = docking.attach_main(&window) {
+            eprintln!("[taskbar-docking] unavailable: {error}");
+        }
+        app.manage(docking);
+    }
 
     let window_for_events = window.clone();
     window.on_window_event(move |event| {
         let app = window_for_events.app_handle();
+        #[cfg(windows)]
+        if let Some(docking) = taskbar_docking_controller(app) {
+            docking.on_main_window_event(&window_for_events, event);
+        }
         match event {
             WindowEvent::Resized(_) => {
                 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -2628,6 +2737,45 @@ fn create_main_window(
     Ok(())
 }
 
+/// The taskbar strip: a borderless, transparent, non-activating page that
+/// mirrors playback over the empty part of the taskbar.
+#[cfg(windows)]
+fn build_taskbar_overlay(
+    app: &AppHandle,
+    port: u16,
+    proxy_relay_enabled: bool,
+) -> tauri::Result<WebviewWindow> {
+    let url = format!("http://127.0.0.1:{port}/taskbar-overlay.html")
+        .parse()
+        .expect("static overlay URL");
+    let mut builder = WebviewWindowBuilder::new(
+        app,
+        taskbar_docking::OVERLAY_LABEL,
+        WebviewUrl::External(url),
+    )
+    .title("YesPlayMusic")
+    .inner_size(380.0, 48.0)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .resizable(false)
+    .maximizable(false)
+    .minimizable(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focusable(false)
+    .visible(false);
+    if proxy_relay_enabled {
+        // WebView2 shares one environment per data folder; the strip must
+        // use the same proxy options as the player or fail to create.
+        let proxy = format!("http://127.0.0.1:{WEBVIEW_PROXY_RELAY_PORT}")
+            .parse()
+            .expect("static proxy URL");
+        builder = builder.proxy_url(proxy);
+    }
+    builder.build()
+}
+
 fn main() {
     let mut updater = tauri_plugin_updater::Builder::new().target(updater_target());
     if let Some(public_key) = updater_public_key() {
@@ -2671,8 +2819,14 @@ fn main() {
                     match action.as_deref() {
                         Some("minimize") => {
                             if let Some(window) = app.get_webview_window("main") {
-                                if window.is_visible().unwrap_or(false) {
-                                    let _ = window.hide();
+                                #[cfg(windows)]
+                                let visible = window.is_visible().unwrap_or(false)
+                                    || taskbar_docking_controller(app)
+                                        .is_some_and(|docking| docking.strip_visible());
+                                #[cfg(not(windows))]
+                                let visible = window.is_visible().unwrap_or(false);
+                                if visible {
+                                    let _ = hide_main_window(app);
                                 } else {
                                     let _ = show_main_window(app);
                                 }
@@ -2695,6 +2849,9 @@ fn main() {
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .skip_initial_state("main")
+                // The docking controller places the strip; a restored state
+                // would drop it somewhere on the desktop.
+                .with_denylist(&[taskbar_docking::OVERLAY_LABEL])
                 .build(),
         )
         .setup(|app| {
@@ -2884,6 +3041,12 @@ fn main() {
     }
 
     app.run(|app, event| match event {
+        #[cfg(windows)]
+        RunEvent::ExitRequested { .. } => {
+            if let Some(docking) = taskbar_docking_controller(app) {
+                docking.shutdown();
+            }
+        }
         RunEvent::Exit => {
             if let Err(error) = persist_current_window_position(app) {
                 eprintln!("[tauri] failed to flush the window position: {error}");

@@ -34,6 +34,7 @@ const settings = {
   showLibraryDefault: false,
   subTitleDefault: false,
   linuxEnableCustomTitlebar: false,
+  windowsTaskbarDocking: true,
   windowsWindowAnimations: true,
   trayIconTheme: 'auto',
   enabledPlaylistCategories,

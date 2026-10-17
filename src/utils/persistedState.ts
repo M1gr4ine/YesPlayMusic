@@ -280,6 +280,10 @@ export function decodeSettingsState(
       stored['linuxEnableCustomTitlebar'],
       defaults.linuxEnableCustomTitlebar
     ),
+    windowsTaskbarDocking: booleanValue(
+      stored['windowsTaskbarDocking'],
+      defaults.windowsTaskbarDocking
+    ),
     windowsWindowAnimations: booleanValue(
       stored['windowsWindowAnimations'],
       defaults.windowsWindowAnimations

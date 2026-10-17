@@ -219,9 +219,13 @@ export default {
     subTitleDefault: '副标题使用别名',
     enableReversedMode: '启用倒序播放功能 (实验性功能)',
     enableCustomTitlebar: '启用自定义标题栏',
+    windowsTaskbarDocking: {
+      title: '允许吸附到任务栏',
+      description: '把小窗拖到任务栏附近时，可以收进任务栏显示歌词。',
+    },
     windowsWindowAnimations: {
       title: '窗口过渡动画',
-      description: '小窗展开时播放过渡动画。关闭后只淡入淡出。',
+      description: '小窗展开、吸附到任务栏时播放过渡动画。关闭后只淡入淡出。',
     },
     enableOsdlyricsSupport: {
       title: '桌面歌词',
@@ -313,6 +317,13 @@ export default {
         minimize: '隐藏/显示播放器',
       },
     },
+  },
+  taskbar: {
+    undock: '恢复为悬浮播放器',
+    hide: '隐藏播放器',
+    loadingLyrics: '正在载入歌词',
+    releaseToDock: '松开吸附到任务栏',
+    dockUnavailable: '任务栏空间不足',
   },
   contextMenu: {
     play: '播放',

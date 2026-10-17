@@ -218,10 +218,15 @@ export default {
     subTitleDefault: 'Show Alias for Subtitle by default',
     enableReversedMode: 'Enable Reversed Mode (Experimental)',
     enableCustomTitlebar: 'Enable custom title bar',
+    windowsTaskbarDocking: {
+      title: 'Dock to the taskbar',
+      description:
+        'Drag the mini player near the taskbar to tuck it in as a lyrics strip.',
+    },
     windowsWindowAnimations: {
       title: 'Window transitions',
       description:
-        'Animate the mini player when it expands. When off, it only fades.',
+        'Animate the mini player when it expands or docks to the taskbar. When off, it only fades.',
     },
     enableOsdlyricsSupport: {
       title: 'desktop lyrics',
@@ -314,6 +319,13 @@ export default {
         minimize: 'Hide/Show player',
       },
     },
+  },
+  taskbar: {
+    undock: 'Back to the floating player',
+    hide: 'Hide the player',
+    loadingLyrics: 'Loading lyrics',
+    releaseToDock: 'Release to dock to the taskbar',
+    dockUnavailable: 'Not enough room on the taskbar',
   },
   contextMenu: {
     play: 'Play',

@@ -51,7 +51,10 @@ export function preparedResources({
     {
       label: 'renderer',
       producer: 'bun run build:tauri:renderer',
-      files: [path.join(root, 'dist-tauri', 'index.html')],
+      files: [
+        path.join(root, 'dist-tauri', 'index.html'),
+        path.join(root, 'dist-tauri', 'taskbar-overlay.html'),
+      ],
       directories: [path.join(root, 'dist-tauri', 'assets')],
     },
     {

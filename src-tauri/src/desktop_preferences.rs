@@ -70,6 +70,10 @@ pub struct DesktopPreferences {
     pub close_app_option: CloseAppOption,
     pub tray_icon_theme: TrayIconTheme,
     pub linux_enable_custom_titlebar: bool,
+    pub windows_taskbar_docking: bool,
+    pub windows_window_animations: bool,
+    /// The OS asks for reduced motion; the renderer reads it and sends it along.
+    pub system_reduced_motion: bool,
 }
 
 impl Default for DesktopPreferences {
@@ -78,6 +82,9 @@ impl Default for DesktopPreferences {
             close_app_option: CloseAppOption::Ask,
             tray_icon_theme: TrayIconTheme::Auto,
             linux_enable_custom_titlebar: false,
+            windows_taskbar_docking: true,
+            windows_window_animations: true,
+            system_reduced_motion: false,
         }
     }
 }
@@ -106,15 +113,20 @@ pub fn parse_desktop_preferences(value: &Value) -> Result<DesktopPreferences, Pr
             ));
         }
     };
-    let linux_enable_custom_titlebar = settings
-        .get("linuxEnableCustomTitlebar")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| PreferenceError::invalid("linuxEnableCustomTitlebar must be a boolean"))?;
+    let boolean = |key: &str| {
+        settings
+            .get(key)
+            .and_then(Value::as_bool)
+            .ok_or_else(|| PreferenceError::invalid(format!("{key} must be a boolean")))
+    };
 
     Ok(DesktopPreferences {
         close_app_option,
         tray_icon_theme,
-        linux_enable_custom_titlebar,
+        linux_enable_custom_titlebar: boolean("linuxEnableCustomTitlebar")?,
+        windows_taskbar_docking: boolean("windowsTaskbarDocking")?,
+        windows_window_animations: boolean("windowsWindowAnimations")?,
+        system_reduced_motion: boolean("systemReducedMotion")?,
     })
 }
 
@@ -537,6 +549,9 @@ mod tests {
             "closeAppOption": "minimizeToTray",
             "trayIconTheme": "auto",
             "linuxEnableCustomTitlebar": true,
+            "windowsTaskbarDocking": false,
+            "windowsWindowAnimations": true,
+            "systemReducedMotion": true,
             "unrelated": true
         });
         assert_eq!(
@@ -545,31 +560,29 @@ mod tests {
                 close_app_option: CloseAppOption::MinimizeToTray,
                 tray_icon_theme: TrayIconTheme::Auto,
                 linux_enable_custom_titlebar: true,
+                windows_taskbar_docking: false,
+                windows_window_animations: true,
+                system_reduced_motion: true,
             }
         );
-        assert!(parse_desktop_preferences(&json!({
-            "closeAppOption": false,
-            "trayIconTheme": "auto",
-            "linuxEnableCustomTitlebar": false
-        }))
-        .is_err());
-        assert!(parse_desktop_preferences(&json!({
-            "closeAppOption": "ask",
-            "trayIconTheme": "system",
-            "linuxEnableCustomTitlebar": false
-        }))
-        .is_err());
-        assert!(parse_desktop_preferences(&json!({
-            "closeAppOption": "ask",
-            "linuxEnableCustomTitlebar": false
-        }))
-        .is_err());
-        assert!(parse_desktop_preferences(&json!({
-            "closeAppOption": "ask",
-            "trayIconTheme": "auto",
-            "linuxEnableCustomTitlebar": "yes"
-        }))
-        .is_err());
+        let with = |key: &str, value: serde_json::Value| {
+            let mut settings = settings.clone();
+            settings[key] = value;
+            settings
+        };
+        assert!(parse_desktop_preferences(&with("closeAppOption", json!(false))).is_err());
+        assert!(parse_desktop_preferences(&with("trayIconTheme", json!("system"))).is_err());
+        assert!(
+            parse_desktop_preferences(&with("linuxEnableCustomTitlebar", json!("yes"))).is_err()
+        );
+        assert!(parse_desktop_preferences(&with("windowsTaskbarDocking", json!(1))).is_err());
+        assert!(parse_desktop_preferences(&with("windowsWindowAnimations", json!(null))).is_err());
+        assert!(parse_desktop_preferences(&with("systemReducedMotion", json!("reduce"))).is_err());
+        for key in ["trayIconTheme", "systemReducedMotion"] {
+            let mut missing = settings.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(parse_desktop_preferences(&missing).is_err(), "{key}");
+        }
     }
 
     #[test]

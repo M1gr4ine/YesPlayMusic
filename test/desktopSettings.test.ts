@@ -1,5 +1,17 @@
 import { expect, test } from 'bun:test';
-import { createOrderedDesktopSettings } from '../src/services/desktopSettings';
+import {
+  createOrderedDesktopSettings,
+  withSystemPreferences,
+} from '../src/services/desktopSettings';
+
+test('the OS motion preference rides along with the settings', () => {
+  // Rust rejects a settings payload without it, so the key is load-bearing.
+  expect(withSystemPreferences({ closeAppOption: 'ask' }, true)).toEqual({
+    closeAppOption: 'ask',
+    systemReducedMotion: true,
+  });
+  expect(withSystemPreferences(null, true)).toBeNull();
+});
 
 test('Discord presence waits for the first settings configuration', async () => {
   const calls: Array<[string, unknown]> = [];

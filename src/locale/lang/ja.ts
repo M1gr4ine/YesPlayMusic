@@ -220,10 +220,15 @@ export default {
     subTitleDefault: 'サブタイトルに別名を表示',
     enableReversedMode: '逆順再生を有効にする（実験的機能）',
     enableCustomTitlebar: 'カスタムタイトルバーを使う',
+    windowsTaskbarDocking: {
+      title: 'タスクバーにドッキング',
+      description:
+        'ミニプレーヤーをタスクバーの近くにドラッグすると、歌詞バーとして収まります。',
+    },
     windowsWindowAnimations: {
       title: 'ウィンドウのトランジション',
       description:
-        'ミニプレーヤーの展開時にアニメーションします。オフにするとフェードのみになります。',
+        'ミニプレーヤーの展開やタスクバーへのドッキング時にアニメーションします。オフにするとフェードのみになります。',
     },
     enableOsdlyricsSupport: {
       title: 'デスクトップ歌詞',
@@ -316,6 +321,13 @@ export default {
         minimize: 'プレーヤーを表示／非表示',
       },
     },
+  },
+  taskbar: {
+    undock: 'フローティング表示に戻す',
+    hide: 'プレーヤーを隠す',
+    loadingLyrics: '歌詞を読み込み中',
+    releaseToDock: '離すとタスクバーにドッキング',
+    dockUnavailable: 'タスクバーの空きが足りません',
   },
   contextMenu: {
     play: '再生',

@@ -447,6 +447,28 @@
       <div v-if="isDesktop && isWindows" class="item">
         <div class="left">
           <div class="title">
+            {{ $t('settings.windowsTaskbarDocking.title') }}
+          </div>
+          <div class="description">
+            {{ $t('settings.windowsTaskbarDocking.description') }}
+          </div>
+        </div>
+        <div class="right">
+          <div class="toggle">
+            <input
+              id="windows-taskbar-docking"
+              v-model="windowsTaskbarDocking"
+              type="checkbox"
+              name="windows-taskbar-docking"
+            />
+            <label for="windows-taskbar-docking"></label>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="isDesktop && isWindows" class="item">
+        <div class="left">
+          <div class="title">
             {{ $t('settings.windowsWindowAnimations.title') }}
           </div>
           <div class="description">
@@ -1791,6 +1813,14 @@ export default defineComponent({
           key: 'unmYtDlExe',
           value: value || undefined,
         });
+      },
+    },
+    windowsTaskbarDocking: {
+      get() {
+        return this.settings.windowsTaskbarDocking;
+      },
+      set(value: boolean) {
+        this.updateSettings({ key: 'windowsTaskbarDocking', value });
       },
     },
     windowsWindowAnimations: {

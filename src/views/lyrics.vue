@@ -39,7 +39,10 @@
       <div
         v-if="isMini"
         class="mini-player"
-        :class="{ 'mini-text-locked': miniTextLocked }"
+        :class="{
+          'mini-text-locked': miniTextLocked,
+          'taskbar-snap-ready': taskbarDockHint === 'ready',
+        }"
         @mouseenter="setWindowButtons(true)"
         @mouseleave="handleMiniMouseLeave"
         @mousedown="handleMiniMouseDown"
@@ -131,6 +134,20 @@
             }"
             :style="miniProgressRiderStyle"
           ></span>
+        </div>
+        <div
+          v-if="taskbarDockHint !== 'none'"
+          class="mini-dock-hint"
+          :class="{ unavailable: taskbarDockHint === 'unavailable' }"
+          role="status"
+        >
+          {{
+            $t(
+              taskbarDockHint === 'ready'
+                ? 'taskbar.releaseToDock'
+                : 'taskbar.dockUnavailable'
+            )
+          }}
         </div>
       </div>
 
@@ -401,7 +418,7 @@
 </template>
 
 <script lang="ts">
-import { defineComponent } from 'vue';
+import { defineComponent, markRaw } from 'vue';
 // The lyrics page of Apple Music is so gorgeous, so I copy the design.
 // Some of the codes are from https://github.com/sl1673495/vue-netease-music
 
@@ -452,6 +469,16 @@ import {
   shouldToggleMiniWindow,
 } from '@/utils/miniWindow';
 import { ARTWORK_SIZE, buildArtworkURL } from '@/utils/artwork';
+import { connectTaskbarDock } from '@/services/taskbarDock';
+import type {
+  TaskbarDockSession,
+  TaskbarPlaybackAction,
+} from '@/services/taskbarDock';
+import type {
+  TaskbarDockHint,
+  TaskbarStripSnapshot,
+} from '@/services/taskbarOverlayChannel';
+import { normalizePersistedLocale } from '@/locale/catalog';
 import type { Artist } from '@/types/domain';
 
 type LyricType = 'translation' | 'romaPronunciation';
@@ -531,6 +558,9 @@ export default defineComponent({
       miniSeekDragging: false,
       miniSeekPreview: null as number | null,
       miniWindowDragStart: null as MiniDragStart | null,
+      taskbarDock: null as TaskbarDockSession | null,
+      taskbarDockHint: 'none' as TaskbarDockHint,
+      taskbarDocked: false,
     };
   },
   computed: {
@@ -650,6 +680,25 @@ export default defineComponent({
     theme() {
       return this.settings.lyricsBackground === true ? 'dark' : 'auto';
     },
+    // What the Windows taskbar strip mirrors while the bar is docked.
+    taskbarSnapshot(): TaskbarStripSnapshot | null {
+      if (!this.taskbarDocked) return null;
+      const duration = Math.max(0, this.player.currentTrackDuration || 0);
+      const progress = Number(this.miniSeekPreview ?? this.player.progress);
+      return {
+        artwork: this.miniImageUrl,
+        title: this.currentTrack.name ?? '',
+        artist: this.artist.name ?? '',
+        lyric: this.displayLyric,
+        lyricLoading: this.lyricLoading,
+        progress: Number.isFinite(progress)
+          ? Math.min(duration, Math.max(0, progress))
+          : 0,
+        duration,
+        playing: this.player.playing === true,
+        locale: normalizePersistedLocale(this.settings.lang),
+      };
+    },
   },
   watch: {
     currentTrack() {
@@ -666,6 +715,9 @@ export default defineComponent({
     displayLyric() {
       this.pushToTray();
     },
+    taskbarSnapshot(snapshot: TaskbarStripSnapshot | null) {
+      if (snapshot) this.taskbarDock?.publish(snapshot);
+    },
     showLyrics(show: boolean) {
       if (shouldRunLyricClock(show, isDesktopRuntime)) {
         this.setLyricsInterval(show);
@@ -676,6 +728,16 @@ export default defineComponent({
     },
   },
   created() {
+    if (isWindowsTauri) {
+      this.taskbarDock = markRaw(
+        connectTaskbarDock({
+          onHint: hint => (this.taskbarDockHint = hint),
+          onDocked: docked => (this.taskbarDocked = docked),
+          onAction: this.handleTaskbarAction,
+          onSeek: this.handleTaskbarSeek,
+        })
+      );
+    }
     this.getLyric();
     this.getCoverColor();
     this.initDate();
@@ -698,6 +760,7 @@ export default defineComponent({
     }
   },
   beforeUnmount: function () {
+    this.taskbarDock?.dispose();
     if (this.timer) {
       clearInterval(this.timer);
     }
@@ -740,6 +803,22 @@ export default defineComponent({
       this.setWindowButtons(!next);
       // Compact mode changes tray lyric visibility.
       this.pushToTray();
+    },
+    handleTaskbarAction(action: TaskbarPlaybackAction) {
+      switch (action) {
+        case 'previous':
+          return this.playPrevTrack();
+        case 'playPause':
+          return this.playOrPause();
+        case 'next':
+          return this.playNextTrack();
+      }
+    },
+    handleTaskbarSeek(seconds: number) {
+      const duration = this.player.currentTrackDuration;
+      if (duration > 0) {
+        this.player.progress = Math.min(duration, Math.max(0, seconds));
+      }
     },
     pushToTray() {
       if (!isDesktopRuntime) return;
@@ -1275,6 +1354,32 @@ export default defineComponent({
     &:hover,
     &.active {
       opacity: 1;
+    }
+  }
+
+  // Feedback while the bar is dragged within reach of the Windows taskbar.
+  &.taskbar-snap-ready {
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.85),
+      inset 0 0 12px rgba(255, 255, 255, 0.25);
+  }
+
+  .mini-dock-hint {
+    position: absolute;
+    top: 4px;
+    left: 50%;
+    z-index: 4;
+    padding: 2px 8px;
+    border-radius: 8px;
+    background: rgba(40, 40, 40, 0.92);
+    color: #eee;
+    font-size: 10px;
+    line-height: 14px;
+    white-space: nowrap;
+    pointer-events: none;
+    transform: translateX(-50%);
+
+    &.unavailable {
+      color: rgba(238, 238, 238, 0.72);
     }
   }
 
