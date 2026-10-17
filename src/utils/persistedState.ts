@@ -246,6 +246,8 @@ export function decodeSettingsState(
       lyricsBackground === 'dynamic'
         ? lyricsBackground
         : defaults.lyricsBackground,
+    lyricsPortraitControls:
+      stored['lyricsPortraitControls'] === 'bottom' ? 'bottom' : 'top',
     showLyricsTime: booleanValue(
       stored['showLyricsTime'],
       defaults.showLyricsTime

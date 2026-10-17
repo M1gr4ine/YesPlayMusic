@@ -32,6 +32,7 @@ export interface SettingsState {
   creeperStyle: boolean;
   showLyricsTranslation: boolean;
   lyricsBackground: boolean | 'blur' | 'dynamic';
+  lyricsPortraitControls: 'top' | 'bottom';
   showLyricsTime: boolean;
   closeAppOption: 'ask' | 'exit' | 'minimizeToTray';
   enableDiscordRichPresence: boolean;

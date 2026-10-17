@@ -26,6 +26,7 @@ const settings = {
   creeperStyle: false,
   showLyricsTranslation: true,
   lyricsBackground: true,
+  lyricsPortraitControls: 'top',
   showLyricsTime: false,
   closeAppOption: 'ask',
   enableDiscordRichPresence: false,

@@ -3,7 +3,10 @@
     <div
       data-tauri-drag-region
       class="lyrics-page"
-      :class="{ 'no-lyric': noLyric }"
+      :class="{
+        'no-lyric': noLyric,
+        'controls-bottom': settings.lyricsPortraitControls === 'bottom',
+      }"
       :data-theme="theme"
     >
       <div
@@ -1957,6 +1960,54 @@ export default defineComponent({
 
     .lyrics-container .line:last-child {
       margin-bottom: calc(50vh - 140px);
+    }
+  }
+
+  // Optional: track info on top, lyrics in the middle, transport at the bottom.
+  // The header containers dissolve so their children join the page grid.
+  .lyrics-page.controls-bottom:not(.no-lyric) {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
+    column-gap: 16px;
+    padding: 76px max(24px, calc((100vw - 560px) / 2)) 16px;
+
+    .left-side,
+    .left-side > div,
+    .left-side .controls {
+      display: contents;
+    }
+
+    .left-side .cover {
+      grid-area: 1 / 1;
+    }
+
+    .left-side .controls .top-part {
+      grid-area: 1 / 2;
+    }
+
+    .right-side {
+      grid-area: 2 / 1 / 3 / -1;
+      margin: 8px 0 0;
+
+      .lyrics-container {
+        mask-image: linear-gradient(
+          transparent,
+          #000 48px,
+          #000 calc(100% - 48px),
+          transparent
+        );
+      }
+    }
+
+    .left-side .controls .progress-bar {
+      grid-area: 3 / 1 / 4 / -1;
+      margin-top: 8px;
+    }
+
+    .left-side .controls .media-controls {
+      grid-area: 4 / 1 / 5 / -1;
+      margin-top: 4px;
     }
   }
 

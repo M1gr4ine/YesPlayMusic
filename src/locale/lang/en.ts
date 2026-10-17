@@ -240,6 +240,11 @@ export default {
       blur: 'Blurred cover',
       dynamic: 'Dynamic (High GPU usage)',
     },
+    lyricsPortraitControls: {
+      text: 'Playback controls in tall windows',
+      top: 'Top',
+      bottom: 'Bottom',
+    },
     closeAppOption: {
       text: 'Close App...',
       ask: 'Ask',

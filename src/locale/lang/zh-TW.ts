@@ -239,6 +239,11 @@ export default {
       blur: '模糊封面',
       dynamic: '動態（GPU 占用較高）',
     },
+    lyricsPortraitControls: {
+      text: '直式視窗時播放控制的位置',
+      top: '上方',
+      bottom: '下方',
+    },
     closeAppOption: {
       text: '關閉主面板時...',
       ask: '詢問',

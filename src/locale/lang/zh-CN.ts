@@ -238,6 +238,11 @@ export default {
       blur: '模糊封面',
       dynamic: '动态（GPU 占用较高）',
     },
+    lyricsPortraitControls: {
+      text: '竖屏时播放控件的位置',
+      top: '上方',
+      bottom: '下方',
+    },
     showLyricsTime: '显示当前时间',
     closeAppOption: {
       text: '关闭主面板时...',

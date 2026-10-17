@@ -206,6 +206,19 @@
       </div>
       <div class="item">
         <div class="left">
+          <div class="title">
+            {{ $t('settings.lyricsPortraitControls.text') }}
+          </div>
+        </div>
+        <div class="right">
+          <Select
+            v-model="lyricsPortraitControls"
+            :options="lyricsPortraitControlsOptions"
+          />
+        </div>
+      </div>
+      <div class="item">
+        <div class="left">
           <div class="title"> {{ $t('settings.showLyricsTime') }} </div>
         </div>
         <div class="right">
@@ -1108,6 +1121,18 @@ export default defineComponent({
         },
       ];
     },
+    lyricsPortraitControlsOptions(): SelectOption[] {
+      return [
+        {
+          value: 'top',
+          label: String(this.$t('settings.lyricsPortraitControls.top')),
+        },
+        {
+          value: 'bottom',
+          label: String(this.$t('settings.lyricsPortraitControls.bottom')),
+        },
+      ];
+    },
     lyricFontSizeOptions(): SelectOption[] {
       return [
         {
@@ -1544,6 +1569,14 @@ export default defineComponent({
           key: 'lyricsBackground',
           value,
         });
+      },
+    },
+    lyricsPortraitControls: {
+      get() {
+        return this.settings.lyricsPortraitControls;
+      },
+      set(value: SettingsState['lyricsPortraitControls']) {
+        this.updateSettings({ key: 'lyricsPortraitControls', value });
       },
     },
     showLyricsTime: {

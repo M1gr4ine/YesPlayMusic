@@ -242,6 +242,11 @@ export default {
       blur: 'ぼかしたジャケット',
       dynamic: 'ダイナミック（GPU 負荷 高）',
     },
+    lyricsPortraitControls: {
+      text: '縦長ウィンドウでの再生コントロールの位置',
+      top: '上',
+      bottom: '下',
+    },
     closeAppOption: {
       text: 'ウィンドウを閉じたとき...',
       ask: '毎回確認',
