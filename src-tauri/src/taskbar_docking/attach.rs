@@ -13,8 +13,8 @@
 //! that one thread, in order, so an enable can never overlap the previous
 //! teardown and nothing on the UI thread ever joins it.
 //!
-//! Window calls here (`SetWindowPos`, `ShowWindow`, `GetWindowRect`) only
-//! ever target windows this process created, whose UI thread never waits
+//! Placement and visibility calls (`SetWindowPos`, `ShowWindow`) only
+//! target windows this process created, whose UI thread never waits
 //! on the docking worker, so their synchronous message round trips cannot
 //! deadlock; `DwmFlush` waits for one composition frame at most.
 
@@ -30,8 +30,11 @@ use std::{
 use windows::{
     core::{w, Result as WinResult},
     Win32::{
-        Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
-        Graphics::Dwm::DwmFlush,
+        Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Graphics::{
+            Dwm::DwmFlush,
+            Gdi::{RedrawWindow, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE},
+        },
         System::{
             Com::{CoCreateInstance, CLSCTX_INPROC_SERVER, SAFEARRAY},
             LibraryLoader::GetModuleHandleW,
@@ -54,16 +57,17 @@ use windows::{
             },
             WindowsAndMessaging::{
                 ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
-                DispatchMessageW, GetClassNameW, GetClientRect, GetGUIThreadInfo, GetMessageW,
-                GetWindowThreadProcessId, KillTimer, PeekMessageW, PostThreadMessageW,
-                RegisterClassW, RegisterWindowMessageW, SetTimer, SetWindowPos, ShowWindow,
+                DispatchMessageW, GetClassNameW, GetClientRect, GetCursorPos, GetDesktopWindow,
+                GetGUIThreadInfo, GetMessageW, GetWindowThreadProcessId, IsWindowVisible,
+                KillTimer, PeekMessageW, PostMessageW, PostThreadMessageW, RegisterClassW,
+                RegisterWindowMessageW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
                 TranslateMessage, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_REORDER,
-                EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART,
-                GUITHREADINFO, GUI_INMOVESIZE, HWND_TOP, HWND_TOPMOST, MSG, MSGFLT_ALLOW,
-                OBJID_WINDOW, PM_NOREMOVE, SET_WINDOW_POS_FLAGS, SPI_SETWORKAREA,
-                SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-                SW_HIDE, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_DISPLAYCHANGE, WM_QUIT,
-                WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+                EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MENUEND, EVENT_SYSTEM_MOVESIZEEND,
+                EVENT_SYSTEM_MOVESIZESTART, GUITHREADINFO, GUI_INMOVESIZE, HWND_TOP, HWND_TOPMOST,
+                MSG, MSGFLT_ALLOW, OBJID_CLIENT, OBJID_WINDOW, PM_NOREMOVE, SET_WINDOW_POS_FLAGS,
+                SPI_SETWORKAREA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE,
+                WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CONTEXTMENU, WM_DISPLAYCHANGE,
+                WM_QUIT, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
             },
         },
     },
@@ -90,10 +94,10 @@ pub fn show_topmost(raw: usize) -> Result<(), String> {
 
 /// Explorer re-asserts the taskbar's top-most position after clicks. The
 /// strip is already top-most, so `HWND_TOP` is what moves it to the front
-/// of that band; `HWND_TOPMOST` would leave its order untouched. Posted,
-/// not sent: nothing waits on the new order.
+/// of that band; `HWND_TOPMOST` would leave its order untouched. Finish the
+/// move before invalidating the WebView so the repaint uses the final order.
 pub fn raise(raw: usize) -> Result<(), String> {
-    z_order(raw, HWND_TOP, SWP_NOMOVE | SWP_ASYNCWINDOWPOS)
+    z_order(raw, HWND_TOP, SWP_NOMOVE)
 }
 
 fn z_order(raw: usize, after: HWND, extra: SET_WINDOW_POS_FLAGS) -> Result<(), String> {
@@ -108,7 +112,64 @@ fn z_order(raw: usize, after: HWND, extra: SET_WINDOW_POS_FLAGS) -> Result<(), S
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | extra,
         )
     }
-    .map_err(|error| format!("could not raise the taskbar strip: {error}"))
+    .map_err(|error| format!("could not raise the taskbar strip: {error}"))?;
+    redraw(raw)
+}
+
+/// Queue a full repaint of the transparent surface and its WebView children.
+/// Painting stays on their UI thread; the docking worker must not wait for it.
+pub fn redraw(raw: usize) -> Result<(), String> {
+    // A null HWND would invalidate the desktop instead of the strip.
+    if raw == 0 {
+        return Err("could not redraw the taskbar strip: no window handle".to_owned());
+    }
+    unsafe {
+        RedrawWindow(
+            Some(hwnd(raw)),
+            None,
+            None,
+            RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_ERASE,
+        )
+    }
+    .ok()
+    .map_err(|error| format!("could not redraw the taskbar strip: {error}"))
+}
+
+pub fn show_taskbar_context_menu(raw: usize) -> WinResult<()> {
+    let overlay = hwnd(raw);
+    if !unsafe { IsWindowVisible(overlay) }.as_bool() {
+        return Ok(());
+    }
+    let mut point = POINT::default();
+    unsafe { GetCursorPos(&mut point)? };
+    if !contains_point(overlay, point) || fullscreen_foreground() {
+        return Ok(());
+    }
+    let Some(taskbar) = taskbar_windows()
+        .into_iter()
+        .find(|&window| contains_point(window, point))
+    else {
+        return Ok(());
+    };
+    if !unsafe { SetForegroundWindow(taskbar) }.as_bool() {
+        eprintln!("[taskbar-docking] could not foreground the taskbar context menu");
+    }
+    // WM_CONTEXTMENU carries signed 16-bit screen coordinates, including secondary displays.
+    let position = u32::from(point.x as u16) | (u32::from(point.y as u16) << 16);
+    unsafe {
+        PostMessageW(
+            Some(taskbar),
+            WM_CONTEXTMENU,
+            WPARAM(taskbar.0 as usize),
+            LPARAM(position as i32 as isize),
+        )
+    }
+}
+
+fn contains_point(window: HWND, point: POINT) -> bool {
+    win32::window_rect(window).is_some_and(|rect| {
+        point.x >= rect.x && point.x < rect.right() && point.y >= rect.y && point.y < rect.bottom()
+    })
 }
 
 pub fn hide(raw: usize) {
@@ -474,17 +535,22 @@ unsafe extern "system" fn taskbar_proc(
     event: u32,
     window: HWND,
     object: i32,
-    _child: i32,
+    child: i32,
     _thread: u32,
     _time: u32,
 ) {
-    if object != OBJID_WINDOW.0 {
-        return;
-    }
     match event {
-        // The desktop re-ordered its children: Explorer raised the taskbar.
-        EVENT_OBJECT_REORDER => notify(HookEvent::TaskbarRaised),
-        EVENT_OBJECT_LOCATIONCHANGE if is_taskbar_class(window) => {
+        EVENT_SYSTEM_MENUEND if is_taskbar_class(window) => notify(HookEvent::TaskbarRaised),
+        // Explorer also reports top-level Z-order changes on the desktop client.
+        EVENT_OBJECT_REORDER
+            if object == OBJID_WINDOW.0
+                || (object == OBJID_CLIENT.0
+                    && child == 0
+                    && window == unsafe { GetDesktopWindow() }) =>
+        {
+            notify(HookEvent::TaskbarRaised);
+        }
+        EVENT_OBJECT_LOCATIONCHANGE if object == OBJID_WINDOW.0 && is_taskbar_class(window) => {
             notify(HookEvent::TaskbarChanged);
         }
         _ => {}
@@ -528,6 +594,7 @@ struct ExplorerWatch {
     /// The taskbar and island windows the handlers were registered on.
     roots: Vec<usize>,
     events: HWINEVENTHOOK,
+    menu: HWINEVENTHOOK,
     automation: Option<IUIAutomation2>,
 }
 
@@ -550,11 +617,28 @@ impl ExplorerWatch {
                 )
             }
         };
+        let menu = if pid == 0 {
+            HWINEVENTHOOK::default()
+        } else {
+            // Menu dismissal can leave the taskbar foreground and unmoved.
+            unsafe {
+                SetWinEventHook(
+                    EVENT_SYSTEM_MENUEND,
+                    EVENT_SYSTEM_MENUEND,
+                    None,
+                    Some(taskbar_proc),
+                    pid,
+                    0,
+                    WINEVENT_OUTOFCONTEXT,
+                )
+            }
+        };
         let automation = (pid != 0).then(|| watch_structure(&roots)).flatten();
         Self {
             pid,
             roots,
             events,
+            menu,
             automation,
         }
     }
@@ -581,6 +665,8 @@ impl ExplorerWatch {
     fn unhook(&mut self) {
         unhook(self.events);
         self.events = HWINEVENTHOOK::default();
+        unhook(self.menu);
+        self.menu = HWINEVENTHOOK::default();
         if let Some(automation) = self.automation.take() {
             let _ = unsafe { automation.RemoveAllEventHandlers() };
         }
@@ -634,4 +720,105 @@ fn watch_structure(roots: &[usize]) -> Option<IUIAutomation2> {
         .is_ok();
     }
     registered.then_some(automation)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hide, raise, show_topmost};
+    use windows::{
+        core::w,
+        Win32::{
+            Foundation::{HWND, RECT},
+            Graphics::Gdi::{GetUpdateRect, ValidateRect},
+            UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, ShowWindow, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE,
+                WS_CHILD, WS_CLIPCHILDREN, WS_POPUP, WS_VISIBLE,
+            },
+        },
+    };
+
+    struct StripWindows {
+        parent: HWND,
+        child: HWND,
+    }
+
+    impl StripWindows {
+        fn new() -> Self {
+            let parent = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    w!("STATIC"),
+                    w!("Taskbar redraw test"),
+                    WS_POPUP | WS_CLIPCHILDREN,
+                    -32000,
+                    -32000,
+                    80,
+                    40,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .expect("create test strip");
+            let mut windows = Self {
+                parent,
+                child: HWND::default(),
+            };
+            windows.child = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    w!("STATIC"),
+                    w!("Webview child"),
+                    WS_CHILD | WS_VISIBLE,
+                    5,
+                    5,
+                    20,
+                    10,
+                    Some(parent),
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .expect("create test webview child");
+            let _ = unsafe { ShowWindow(parent, SW_SHOWNOACTIVATE) };
+            for window in [windows.parent, windows.child] {
+                assert!(unsafe { ValidateRect(Some(window), None) }.as_bool());
+                assert!(!unsafe { GetUpdateRect(window, None, false) }.as_bool());
+            }
+            windows
+        }
+
+        fn assert_fully_invalidated(&self) {
+            for (window, expected) in [(self.parent, (0, 0, 80, 40)), (self.child, (0, 0, 20, 10))]
+            {
+                let mut update = RECT::default();
+                assert!(
+                    unsafe { GetUpdateRect(window, Some(&mut update), false) }.as_bool(),
+                    "the strip and webview child must retain a queued repaint"
+                );
+                assert_eq!(
+                    (update.left, update.top, update.right, update.bottom),
+                    expected
+                );
+            }
+        }
+    }
+
+    impl Drop for StripWindows {
+        fn drop(&mut self) {
+            hide(self.parent.0 as usize);
+            let _ = unsafe { DestroyWindow(self.parent) };
+        }
+    }
+
+    #[test]
+    fn strip_updates_queue_a_full_webview_repaint() {
+        for update in [show_topmost, raise] {
+            let windows = StripWindows::new();
+            update(windows.parent.0 as usize).expect("update test strip");
+            windows.assert_fully_invalidated();
+        }
+    }
 }

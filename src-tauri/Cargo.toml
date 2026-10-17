@@ -68,6 +68,7 @@ windows = { version = "=0.61.3", features = [
 
 [patch.crates-io]
 tauri-plugin-updater = { path = "patches/tauri-plugin-updater-2.10.1" }
+tray-icon = { path = "patches/tray-icon-0.24.2" }
 
 # Debug builds keep our own crates unoptimized for fast compiles, but let
 # dependencies (JPEG decode, resize, FFT, audio) run at full speed — cover

@@ -20,10 +20,14 @@ mod attach;
 #[cfg(windows)]
 mod controller;
 #[cfg(windows)]
+mod overlay;
+#[cfg(windows)]
 mod probe;
 
 #[cfg(windows)]
 pub use controller::Controller;
+#[cfg(windows)]
+pub use overlay::configure_overlay;
 
 /// Label of the strip window; `tauri_plugin_window_state` must never restore it.
 pub const OVERLAY_LABEL: &str = "taskbar-strip";
