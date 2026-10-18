@@ -733,7 +733,7 @@ fn settle_rect(overlay: usize, rect: Rect) -> Result<(), String> {
     if attach::window_rect(overlay) != Some(rect) {
         attach::set_rect(overlay, rect)?;
     }
-    Ok(())
+    attach::redraw(overlay)
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

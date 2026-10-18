@@ -2773,7 +2773,12 @@ fn build_taskbar_overlay(
             .expect("static proxy URL");
         builder = builder.proxy_url(proxy);
     }
-    builder.build()
+    let window = builder.build()?;
+    if let Err(error) = taskbar_docking::configure_overlay(&window) {
+        let _ = window.destroy();
+        return Err(error);
+    }
+    Ok(window)
 }
 
 fn main() {
