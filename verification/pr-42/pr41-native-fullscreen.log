@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.54s
+     Running unittests src\main.rs (F:\DevTools\yesplaymusic-build\cargo-target\debug\deps\yesplaymusic_tauri-e39f1d2abc61bda8.exe)
+
+running 1 test
+test taskbar_docking::attach::fullscreen_tests::watcher_tracks_same_window_fullscreen_and_timer_only_recovery ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 92 filtered out; finished in 0.90s
+

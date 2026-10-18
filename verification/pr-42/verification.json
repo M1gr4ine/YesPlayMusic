@@ -1,0 +1,148 @@
+{
+  "createdAt": "2026-10-18T16:28:38.479926+08:00",
+  "pr41": {
+    "head": "d7d8266016e115b06fc197c85711032e7a27ff39",
+    "trackedFilesMatched": 657,
+    "nativeFullscreenFixture": "passed; one explicit ignored test; Apex not tested"
+  },
+  "pr42": {
+    "fixHead": "5636d7e5c66361dca7bb047ac540ecfc403f505d",
+    "testFixHead": "1501091b57413975b19483178544da4de76053c7",
+    "base": "f6834bea3ebc14da3f40ea1efcaf446afca8b1be",
+    "candidateCommit": "4bfb55bd18e3b0130fe671d3a836409172948fd3",
+    "verifiedMergeTree": "f4808f27c4fafaaf29a38d6acfa165b285379ce5",
+    "trackedFilesMatchedBeforeTestOnlyChange": 675,
+    "executableSha256": "27bece549473299af1c4aba058e6164372c647bde72cc6ca8f8ff7d209f467ca",
+    "applicationCodeChangedInThisReview": false,
+    "input": "Native SendInput; physical desktop pixels; screenshots captured before any forced redraw",
+    "trayCycles": 3,
+    "trayRow31LineScores": [
+      0,
+      0,
+      0
+    ],
+    "nextTrackId": 67381,
+    "nextRow31LineScore": 0,
+    "freshDockFrames": [
+      238,
+      238
+    ],
+    "freshDockArtifactFrames": [
+      0,
+      0
+    ],
+    "freshDockHideEvents": [
+      0,
+      0
+    ],
+    "gracefulTrayExitCode": 0,
+    "restoredPlayback": {
+      "id": 509312402,
+      "playing": false,
+      "progress": 238.9,
+      "progressToleranceSeconds": 1,
+      "windowRestoredToInitialOuterRect": {
+        "x": 232,
+        "y": 108,
+        "width": 1456,
+        "height": 68
+      }
+    }
+  },
+  "beforeScreenshots": {
+    "source": "Historical physical desktop reproduction screenshots saved before the fix",
+    "version": "v0.11.1; 8fffc22 baseline",
+    "baselineExecutableSha256": "ff4dd9c2429f78a582fae2a6ef283417b3b631bd6c07b8ecd8e76cc6f412bc4d",
+    "recapturedThisRun": false
+  },
+  "screenshots": {
+    "before-tray.png": {
+      "sourceFilename": "issue39-before-tray-confirmed.png",
+      "sha256": "64ca0f2cd79844b43e4d892e6bf16762cc56cd2ed6eba832b1347ab944852271"
+    },
+    "before-next.png": {
+      "sourceFilename": "issue39-before-next.png",
+      "sha256": "a6b9551282ea4acd86bb8869fef6abbc874de9a24479de85f597df0152514dde"
+    },
+    "after-tray.png": {
+      "sourceFilename": "after-tray-2.png",
+      "sha256": "6595497560c38636b129423f726c17e9c100863866677cf09f3c4297d02f978f"
+    },
+    "after-next.png": {
+      "sourceFilename": "after-next-clean.png",
+      "sha256": "ebfbf2ac0be053c13fc3056e6e9a6725ab7333c831f2b731093bf7d9cf19cb80"
+    },
+    "after-tray-menu.png": {
+      "sourceFilename": "after-tray-menu-2.png",
+      "sha256": "12dda0a6e0d381306769bf6d3149fac1ca759c7d09b26bb18992ee8066086da8"
+    }
+  },
+  "checks": [
+    {
+      "pr": "pr41",
+      "check": "fmt",
+      "exitCode": 0
+    },
+    {
+      "pr": "pr41",
+      "check": "clippy",
+      "exitCode": 0
+    },
+    {
+      "pr": "pr42",
+      "check": "fmt",
+      "exitCode": 0
+    },
+    {
+      "pr": "pr42",
+      "check": "clippy",
+      "exitCode": 0
+    },
+    {
+      "pr": "pr41",
+      "check": "cargo test --workspace",
+      "exitCode": 0
+    },
+    {
+      "pr": "pr42",
+      "check": "cargo test --workspace",
+      "exitCode": 0
+    },
+    {
+      "pr": "pr41",
+      "check": "bun test",
+      "exitCode": 1
+    },
+    {
+      "pr": "pr41",
+      "check": "bun run typecheck",
+      "exitCode": 0
+    },
+    {
+      "pr": "pr41",
+      "check": "bun run build:tauri:renderer",
+      "exitCode": 0
+    },
+    {
+      "pr": "pr42",
+      "check": "bun test",
+      "exitCode": 1
+    },
+    {
+      "pr": "pr42",
+      "check": "bun run typecheck",
+      "exitCode": 0
+    },
+    {
+      "pr": "pr42",
+      "check": "bun run build:tauri:renderer",
+      "exitCode": 0
+    }
+  ],
+  "bunFailures": [
+    "appCompliance.test.ts: unified host and renderer inventory: Windows symlink EPERM",
+    "updaterRelease.test.ts: symlinked launch paths: Windows symlink EPERM"
+  ],
+  "ciFix": "Only test timing changed: sleep 2 -> 5 seconds, measurement duration 0.2 -> 1 second, interval 0.1 -> 0.5 second; two real samples and verifier rules retained",
+  "ciRun": "https://github.com/nagi-studio/YesPlayMusic/actions/runs/39110706657"
+}
