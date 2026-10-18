@@ -514,7 +514,7 @@ describe('进程树性能采样', () => {
     const evidencePath = path.join(directory, 'evidence.json');
     await Bun.write(artifactPath, 'artifact');
     symlinkSync('/bin/sleep', executablePath);
-    const target = Bun.spawn([executablePath, '2'], {
+    const target = Bun.spawn([executablePath, '5'], {
       stdout: 'ignore',
       stderr: 'ignore',
     });
@@ -526,9 +526,9 @@ describe('进程树性能采样', () => {
         '--pid',
         String(target.pid),
         '--duration',
-        '0.2',
+        '1',
         '--interval',
-        '0.1',
+        '0.5',
         '--evidence',
         evidencePath,
         '--artifact',
