@@ -2,9 +2,10 @@
 //! watcher thread that turns our own move loop, foreground changes and
 //! Explorer's taskbar changes into controller events.
 //!
-//! Nothing here polls. Drag boundaries come from `EVENT_SYSTEM_MOVESIZESTART`
-//! / `END` on this process, full-screen apps from `EVENT_SYSTEM_FOREGROUND`,
-//! taskbar moves and re-ordering from Explorer's taskbar thread, button or
+//! Drag boundaries come from `EVENT_SYSTEM_MOVESIZESTART` / `END` on this
+//! process. Foreground events detect full-screen apps promptly while a
+//! dock-scoped reconciliation catches same-window transitions. Moves
+//! and re-ordering come from Explorer's taskbar thread, button or
 //! tray changes from UI Automation structure events, and Explorer restarts
 //! from the `TaskbarCreated` broadcast on a hidden window.
 //!
@@ -30,10 +31,13 @@ use std::{
 use windows::{
     core::{w, Result as WinResult},
     Win32::{
-        Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
+        Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::{
             Dwm::DwmFlush,
-            Gdi::{RedrawWindow, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE},
+            Gdi::{
+                ClientToScreen, GetMonitorInfoW, MonitorFromWindow, RedrawWindow, MONITORINFO,
+                MONITOR_DEFAULTTONEAREST, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE,
+            },
         },
         System::{
             Com::{CoCreateInstance, CLSCTX_INPROC_SERVER, SAFEARRAY},
@@ -57,14 +61,15 @@ use windows::{
             },
             WindowsAndMessaging::{
                 ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
-                DispatchMessageW, GetClassNameW, GetClientRect, GetDesktopWindow, GetGUIThreadInfo,
-                GetMessageW, GetWindowThreadProcessId, KillTimer, PeekMessageW, PostThreadMessageW,
-                RegisterClassW, RegisterWindowMessageW, SetTimer, SetWindowPos, ShowWindow,
-                TranslateMessage, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_REORDER,
-                EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART,
-                GUITHREADINFO, GUI_INMOVESIZE, HWND_TOP, HWND_TOPMOST, MSG, MSGFLT_ALLOW,
-                OBJID_CLIENT, OBJID_WINDOW, PM_NOREMOVE, SET_WINDOW_POS_FLAGS, SPI_SETWORKAREA,
-                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, WINDOW_EX_STYLE,
+                DispatchMessageW, GetClassNameW, GetClientRect, GetDesktopWindow,
+                GetForegroundWindow, GetGUIThreadInfo, GetMessageW, GetWindowThreadProcessId,
+                KillTimer, PeekMessageW, PostThreadMessageW, RegisterClassW,
+                RegisterWindowMessageW, SetTimer, SetWindowPos, ShowWindow, TranslateMessage,
+                EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_REORDER, EVENT_SYSTEM_FOREGROUND,
+                EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, GUITHREADINFO,
+                GUI_INMOVESIZE, HWND_TOP, HWND_TOPMOST, MSG, MSGFLT_ALLOW, OBJID_CLIENT,
+                OBJID_WINDOW, PM_NOREMOVE, SET_WINDOW_POS_FLAGS, SPI_SETWORKAREA, SWP_NOACTIVATE,
+                SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, WINDOW_EX_STYLE,
                 WINEVENT_OUTOFCONTEXT, WM_APP, WM_DISPLAYCHANGE, WM_QUIT, WM_SETTINGCHANGE,
                 WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
             },
@@ -169,11 +174,77 @@ pub fn frame_now(raw: usize) -> (Option<Rect>, Option<bool>) {
     (frame, compact)
 }
 
-/// A full-screen app or presentation owns the display.
-pub fn fullscreen_foreground() -> bool {
-    matches!(
-        unsafe { SHQueryUserNotificationState() },
-        Ok(QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE)
+/// A full-screen app or presentation owns the display; failed probes are unknown.
+fn fullscreen_foreground() -> Option<bool> {
+    // Display guards run on the worker too; compare physical pixels on both threads.
+    let previous =
+        unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    if previous.0.is_null() {
+        return None;
+    }
+    let fullscreen = match unsafe { SHQueryUserNotificationState() } {
+        Ok(QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE) => Some(true),
+        Ok(_) => {
+            let foreground = unsafe { GetForegroundWindow() };
+            if foreground.0.is_null() {
+                None
+            } else {
+                window_covers_monitor(foreground)
+            }
+        }
+        Err(_) => None,
+    };
+    unsafe { SetThreadDpiAwarenessContext(previous) };
+    fullscreen
+}
+
+/// Unknown samples preserve the last known value; startup follows State's false default.
+fn remember_fullscreen_sample(previous: &mut Option<bool>, sample: Option<bool>) -> (bool, bool) {
+    let Some(sample) = sample else {
+        return (previous.as_ref().copied().unwrap_or(false), false);
+    };
+    let changed = *previous != Some(sample);
+    *previous = Some(sample);
+    (sample, changed)
+}
+
+/// Client bounds exclude the invisible resize frame of maximized windows.
+fn window_covers_monitor(window: HWND) -> Option<bool> {
+    let mut class = [0u16; 64];
+    let length = usize::try_from(unsafe { GetClassNameW(window, &mut class) }).ok()?;
+    if length == 0 {
+        return None;
+    }
+    if ["Progman", "WorkerW"]
+        .iter()
+        .any(|desktop| desktop.encode_utf16().eq(class[..length].iter().copied()))
+    {
+        return Some(false);
+    }
+    let mut client = RECT::default();
+    unsafe { GetClientRect(window, &mut client) }.ok()?;
+    let mut origin = POINT {
+        x: client.left,
+        y: client.top,
+    };
+    let mut end = POINT {
+        x: client.right,
+        y: client.bottom,
+    };
+    unsafe { ClientToScreen(window, &mut origin) }.ok().ok()?;
+    unsafe { ClientToScreen(window, &mut end) }.ok().ok()?;
+    let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
+    let mut info = MONITORINFO {
+        cbSize: u32::try_from(std::mem::size_of::<MONITORINFO>()).ok()?,
+        ..Default::default()
+    };
+    unsafe { GetMonitorInfoW(monitor, &mut info) }.ok().ok()?;
+    let screen = info.rcMonitor;
+    Some(
+        origin.x <= screen.left
+            && origin.y <= screen.top
+            && end.x >= screen.right
+            && end.y >= screen.bottom,
     )
 }
 
@@ -199,12 +270,17 @@ pub type Sink = Box<dyn Fn(HookEvent) + Send + Sync>;
 static SINK: Mutex<Option<Sink>> = Mutex::new(None);
 static MAIN_HWND: AtomicUsize = AtomicUsize::new(0);
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+static LAST_FULLSCREEN: Mutex<Option<bool>> = Mutex::new(None);
 
 /// `wParam` 1 enables, 0 disables.
 const WM_WATCH: u32 = WM_APP + 1;
+/// Poll only during a docking phase, including its flights.
+const WM_DOCKED: u32 = WM_APP + 3;
 /// Re-target the Explorer hooks; `wParam` 1 forces it even when nothing changed.
 const WM_REHOOK: u32 = WM_APP + 2;
 const REHOOK_TIMER: usize = 1;
+const FULLSCREEN_TIMER: usize = 2;
+const FULLSCREEN_RECHECK_MS: u32 = 250;
 const REHOOK_RETRY: Duration = Duration::from_secs(1);
 const REHOOK_ATTEMPTS: u32 = 5;
 const TASKBAR_CLASSES: [&str; 4] = [
@@ -254,6 +330,10 @@ impl Watcher {
         self.post(WM_WATCH, 0);
     }
 
+    pub fn set_docked(&self, docked: bool) {
+        self.post(WM_DOCKED, usize::from(docked));
+    }
+
     /// Re-targets the Explorer hooks if its process or its taskbar windows
     /// changed since they were set (restart whose broadcast was missed, a
     /// monitor plugged in).
@@ -294,6 +374,11 @@ fn watch_loop(ready: &mpsc::Sender<u32>) {
                     attempts = 0;
                 }
             }
+            WM_DOCKED => {
+                if let Some(installed) = &mut installed {
+                    installed.set_docked(message.wParam.0 != 0);
+                }
+            }
             WM_REHOOK => {
                 if let Some(installed) = &mut installed {
                     if message.wParam.0 != 0 {
@@ -328,6 +413,7 @@ struct Installed {
     own: HWINEVENTHOOK,
     foreground: HWINEVENTHOOK,
     window: Option<HWND>,
+    polling: bool,
     explorer: ExplorerWatch,
 }
 
@@ -355,13 +441,43 @@ impl Installed {
                 WINEVENT_OUTOFCONTEXT,
             )
         };
+        if foreground.0.is_null() {
+            eprintln!("[taskbar-docking] fullscreen event hook failed; using reconciliation");
+        }
         let window = create_watch_window();
         let explorer = ExplorerWatch::hook();
+        refresh_foreground();
         Self {
             own,
             foreground,
             window,
+            polling: false,
             explorer,
+        }
+    }
+
+    fn set_docked(&mut self, docked: bool) {
+        if self.polling == docked {
+            return;
+        }
+        let Some(window) = self.window else {
+            if docked {
+                eprintln!("[taskbar-docking] no fullscreen polling window; retaining known state");
+            }
+            return;
+        };
+        if docked {
+            let timer =
+                unsafe { SetTimer(Some(window), FULLSCREEN_TIMER, FULLSCREEN_RECHECK_MS, None) };
+            self.polling = timer != 0;
+            if !self.polling {
+                eprintln!(
+                    "[taskbar-docking] fullscreen polling could not start; retaining known state"
+                );
+            }
+        } else {
+            let _ = unsafe { KillTimer(Some(window), FULLSCREEN_TIMER) };
+            self.polling = false;
         }
     }
 }
@@ -371,6 +487,7 @@ impl Drop for Installed {
         self.explorer.unhook();
         if let Some(window) = self.window.take() {
             let _ = unsafe { KillTimer(Some(window), REHOOK_TIMER) };
+            let _ = unsafe { KillTimer(Some(window), FULLSCREEN_TIMER) };
             let _ = unsafe { DestroyWindow(window) };
         }
         unhook(self.own);
@@ -438,6 +555,9 @@ unsafe extern "system" fn watch_proc(
         WM_SETTINGCHANGE if wparam.0 == SPI_SETWORKAREA.0 as usize => {
             notify(HookEvent::TaskbarChanged);
         }
+        WM_TIMER if wparam.0 == FULLSCREEN_TIMER => {
+            refresh_foreground();
+        }
         WM_TIMER if wparam.0 == REHOOK_TIMER => {
             let _ = unsafe { KillTimer(Some(window), REHOOK_TIMER) };
             let _ = unsafe {
@@ -487,9 +607,20 @@ unsafe extern "system" fn foreground_proc(
     _thread: u32,
     _time: u32,
 ) {
-    notify(HookEvent::Foreground {
-        fullscreen: fullscreen_foreground(),
-    });
+    refresh_foreground();
+}
+
+/// Share the last known sample with display guards and the polling timer.
+pub fn refresh_foreground() -> bool {
+    // Sampling and publishing stay ordered across the watcher and display guards.
+    let mut previous = LAST_FULLSCREEN
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (fullscreen, changed) = remember_fullscreen_sample(&mut previous, fullscreen_foreground());
+    if changed {
+        notify(HookEvent::Foreground { fullscreen });
+    }
+    fullscreen
 }
 
 unsafe extern "system" fn taskbar_proc(
@@ -763,3 +894,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod fullscreen_tests;
