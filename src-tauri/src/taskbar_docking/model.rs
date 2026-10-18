@@ -401,6 +401,8 @@ pub enum Effect {
     /// `StripReady` follows once its page listens.
     PrepareStrip(Rect),
     ShowStrip,
+    /// An explicit tray show bypasses the automatic fullscreen guard.
+    ShowStripRequested,
     HidePlayer,
     /// Fly the strip between two rects; `FlightFinished` follows.
     StartFlight(Flight),
@@ -512,7 +514,6 @@ pub fn step(mut state: State, event: Event) -> (State, Vec<Effect>) {
         Event::Taskbars(Some(taskbars)) => {
             state.taskbars = Some(taskbars.clone());
             let compact = state.compact;
-            let fullscreen = state.fullscreen;
             match &mut state.phase {
                 Phase::Undocked { drag: Some(drag) } => {
                     drag.taskbars = Some(taskbars);
@@ -538,16 +539,14 @@ pub fn step(mut state: State, event: Event) -> (State, Vec<Effect>) {
                             if *show_pending {
                                 *show_pending = false;
                                 *visible = true;
-                                *covered = fullscreen;
-                                if fullscreen {
-                                    Vec::new()
-                                } else {
-                                    vec![
-                                        Effect::PlaceStrip(strip),
-                                        Effect::ShowStrip,
-                                        Effect::StripPhase(StripPhase::Docked),
-                                    ]
-                                }
+                                // A tray show is an explicit override, even
+                                // while the last fullscreen sample is true.
+                                *covered = false;
+                                vec![
+                                    Effect::PlaceStrip(strip),
+                                    Effect::ShowStripRequested,
+                                    Effect::StripPhase(StripPhase::Docked),
+                                ]
                             } else if moved && *visible && !*covered {
                                 vec![Effect::PlaceStrip(strip)]
                             } else {
@@ -605,8 +604,13 @@ pub fn step(mut state: State, event: Event) -> (State, Vec<Effect>) {
             }
         }
         Event::Foreground { fullscreen } => {
+            let changed = state.fullscreen != fullscreen;
             state.fullscreen = fullscreen;
-            foreground(&mut state, fullscreen)
+            if changed {
+                foreground(&mut state, fullscreen)
+            } else {
+                Vec::new()
+            }
         }
         Event::ExplorerRestarted => {
             state.taskbars = None;
@@ -697,25 +701,22 @@ pub fn step(mut state: State, event: Event) -> (State, Vec<Effect>) {
             Phase::Docking { .. } => abort(&mut state),
             Phase::Docked {
                 visible: false,
+                covered,
                 show_pending,
                 ..
             } => {
                 *show_pending = true;
+                *covered = false;
                 vec![Effect::Probe]
             }
             Phase::Docked {
-                covered: covered @ true,
-                placement,
+                visible: true,
+                covered,
                 ..
             } => {
                 *covered = false;
-                vec![
-                    Effect::PlaceStrip(placement.strip),
-                    Effect::ShowStrip,
-                    Effect::StripPhase(StripPhase::Docked),
-                ]
+                vec![Effect::ShowStripRequested]
             }
-            Phase::Docked { .. } => vec![Effect::Raise],
             Phase::Undocking { show_player, .. } => {
                 *show_player = true;
                 Vec::new()
@@ -1730,12 +1731,12 @@ mod tests {
             trace[4],
             vec![
                 Effect::PlaceStrip(STRIP),
-                Effect::ShowStrip,
+                Effect::ShowStripRequested,
                 Effect::StripPhase(StripPhase::Docked)
             ],
             "a strip shown again is told its phase again"
         );
-        assert_eq!(trace[5], vec![Effect::Raise]);
+        assert_eq!(trace[5], vec![Effect::ShowStripRequested]);
         assert!(state.strip_visible());
     }
 
@@ -1807,27 +1808,72 @@ mod tests {
                 Effect::StripPhase(StripPhase::Docked)
             ]
         );
-        assert_eq!(trace[5], vec![Effect::Raise]);
+        assert_eq!(trace[5], vec![]);
         assert_eq!(trace[6], vec![Effect::Raise]);
         assert!(state.strip_visible());
 
-        // An explicit show while covered wins over the full-screen app;
-        // undocking from under one skips the flight.
+        // An explicit show request restores the original tray priority.
         let (covered, _) = run(docked_state(), vec![Event::Foreground { fullscreen: true }]);
-        let (_, trace) = run(covered.clone(), vec![Event::ShowRequested]);
+        let (shown, trace) = run(covered.clone(), vec![Event::ShowRequested]);
+        assert_eq!(trace[0], vec![Effect::ShowStripRequested,]);
+        assert!(shown.strip_visible());
+        let (shown, trace) = run(shown, vec![Event::ShowRequested]);
+        assert_eq!(trace[0], vec![Effect::ShowStripRequested]);
+        assert!(shown.strip_visible());
+        let (shown, trace) = run(shown, vec![Event::TaskbarRaised]);
+        assert_eq!(trace[0], vec![Effect::Raise]);
+        assert!(shown.strip_visible());
+        let (shown, trace) = run(shown, vec![Event::Foreground { fullscreen: true }]);
         assert_eq!(
             trace[0],
-            vec![
-                Effect::PlaceStrip(STRIP),
-                Effect::ShowStrip,
-                Effect::StripPhase(StripPhase::Docked)
-            ]
+            vec![],
+            "duplicate samples preserve the tray override"
         );
+        assert!(shown.strip_visible());
+        let (shown, trace) = run(
+            shown,
+            vec![
+                Event::Foreground { fullscreen: false },
+                Event::Foreground { fullscreen: true },
+            ],
+        );
+        assert_eq!(trace[0], vec![Effect::Raise]);
+        assert_eq!(trace[1], vec![Effect::HideStrip]);
+        assert!(!shown.strip_visible());
         let (state, trace) = run(covered.clone(), vec![Event::UndockRequested]);
         assert_eq!(trace[0], abort_with_player(bar_frame(1000)));
         assert_eq!(state.phase, Phase::Undocked { drag: None });
         let (_, trace) = run(covered, vec![Event::HideRequested]);
         assert_eq!(trace[0], vec![], "already off screen");
+    }
+
+    #[test]
+    fn show_requested_while_hidden_waits_for_probe_then_overrides_fullscreen() {
+        let (hidden, _) = run(docked_state(), vec![Event::HideRequested]);
+        let (pending, trace) = run(
+            hidden,
+            vec![Event::Foreground { fullscreen: true }, Event::ShowRequested],
+        );
+        assert_eq!(trace[1], vec![Effect::Probe]);
+        assert!(matches!(
+            pending.phase,
+            Phase::Docked {
+                visible: false,
+                show_pending: true,
+                ..
+            }
+        ));
+
+        let (shown, trace) = run(pending, vec![Event::Taskbars(Some(vec![win11_bar()]))]);
+        assert_eq!(
+            trace[0],
+            vec![
+                Effect::PlaceStrip(STRIP),
+                Effect::ShowStripRequested,
+                Effect::StripPhase(StripPhase::Docked),
+            ]
+        );
+        assert!(shown.strip_visible());
     }
 
     #[test]
@@ -1896,7 +1942,7 @@ mod tests {
                 Effect::Probe
             ]
         );
-        assert_eq!(trace[4], vec![Effect::Raise]);
+        assert_eq!(trace[4], vec![Effect::ShowStripRequested]);
         assert!(state.strip_visible());
 
         // The app arrives mid-flight: the flight is cut short, covered.
@@ -1921,7 +1967,7 @@ mod tests {
         assert_eq!(trace[0], abort_with_player(bar_frame(1000)));
         assert_eq!(state.phase, Phase::Undocked { drag: None });
 
-        // A show honoured while a full-screen app is up waits for it to leave.
+        // A tray show explicitly reveals the strip, even while fullscreen.
         let (state, trace) = run(
             docked_state(),
             vec![
@@ -1932,15 +1978,15 @@ mod tests {
                 Event::Foreground { fullscreen: false },
             ],
         );
-        assert_eq!(trace[3], vec![]);
         assert_eq!(
-            trace[4],
+            trace[3],
             vec![
                 Effect::PlaceStrip(STRIP),
-                Effect::ShowStrip,
+                Effect::ShowStripRequested,
                 Effect::StripPhase(StripPhase::Docked)
             ]
         );
+        assert_eq!(trace[4], vec![Effect::Raise]);
         assert!(state.strip_visible());
     }
 

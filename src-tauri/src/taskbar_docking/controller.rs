@@ -134,6 +134,9 @@ impl Controller {
     pub fn show_requested(&self) -> bool {
         let docked = self.is_docked();
         if docked {
+            // Queue the foreground state before the tray override. The refresh
+            // lock serializes this with hook samples that are already in flight.
+            attach::refresh_foreground();
             self.dispatch(Event::ShowRequested);
         }
         docked
@@ -461,12 +464,38 @@ impl Worker {
     }
 
     fn step(&mut self, event: Event) {
-        let effects = {
-            let mut state = lock(&self.inner.state);
-            let (next, effects) = model::step(std::mem::take(&mut state), event);
-            *state = next;
-            effects
+        // Same-window fullscreen changes may not produce foreground events.
+        // Sample before the first dock effects so startup cannot expose the
+        // strip before dock-scoped polling begins.
+        let needs_initial_sample = {
+            let state = lock(&self.inner.state);
+            let (next, _) = model::step(state.clone(), event.clone());
+            !state.is_docked() && next.is_docked()
         };
+        let initial_sample = needs_initial_sample.then(attach::refresh_foreground);
+        let (effects, docked_changed, docked) = {
+            let mut state = lock(&self.inner.state);
+            let was_docked = state.is_docked();
+            let mut effects = Vec::new();
+            if let Some(fullscreen) = initial_sample {
+                let (next, sampled) = model::step(
+                    std::mem::take(&mut *state),
+                    Event::Foreground { fullscreen },
+                );
+                *state = next;
+                effects.extend(sampled);
+            }
+            let (next, mut stepped) = model::step(std::mem::take(&mut *state), event);
+            *state = next;
+            effects.append(&mut stepped);
+            let docked = state.is_docked();
+            (effects, was_docked != docked, docked)
+        };
+        if docked_changed {
+            if let Some(watcher) = &self.watcher {
+                watcher.set_docked(docked);
+            }
+        }
         for effect in effects {
             if self.inner.stopping.load(Ordering::Acquire) {
                 return;
@@ -515,7 +544,15 @@ impl Worker {
                     self.prepare_deadline = Some(Instant::now() + OVERLAY_READY_TIMEOUT);
                 }
             }
-            Effect::ShowStrip => attach::show_topmost(self.overlay_hwnd()?)?,
+            Effect::ShowStrip => {
+                // A queued show must not overtake a game's fullscreen transition.
+                if attach::refresh_foreground() && !self.explicit_fullscreen_override() {
+                    self.step(Event::Foreground { fullscreen: true });
+                } else {
+                    attach::show_topmost(self.overlay_hwnd()?)?;
+                }
+            }
+            Effect::ShowStripRequested => attach::show_topmost(self.overlay_hwnd()?)?,
             Effect::HidePlayer => {
                 let main = self.inner.main_hwnd.load(Ordering::Acquire);
                 if attach::in_move_loop(main) {
@@ -565,6 +602,7 @@ impl Worker {
         }
         if let Some(watcher) = &self.watcher {
             watcher.enable();
+            watcher.set_docked(lock(&self.inner.state).is_docked());
         }
         Ok(())
     }
@@ -642,6 +680,10 @@ impl Worker {
 
     fn raise_now(&mut self) {
         self.last_raise = Some(Instant::now());
+        if attach::refresh_foreground() && !self.explicit_fullscreen_override() {
+            self.step(Event::Foreground { fullscreen: true });
+            return;
+        }
         if !lock(&self.inner.state).strip_visible() {
             return;
         }
@@ -650,6 +692,13 @@ impl Worker {
                 eprintln!("[taskbar-docking] {error}");
             }
         }
+    }
+
+    /// `covered = false` while fullscreen is true is the tray's explicit
+    /// visibility override; keep honoring it until the sampled value changes.
+    fn explicit_fullscreen_override(&self) -> bool {
+        let state = lock(&self.inner.state);
+        state.fullscreen && state.strip_visible()
     }
 
     fn ensure_overlay(&mut self) -> Result<usize, String> {
