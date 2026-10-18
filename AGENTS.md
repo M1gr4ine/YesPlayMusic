@@ -32,7 +32,8 @@ CI（`.github/workflows/build.yaml`）只验证每次 push 的**最后一个 com
 
 改了 `#[cfg(windows)]` 的代码（`taskbar_docking/`、`win32.rs`、`qq_music_login.rs` 等），
 在 Mac 上加跑一遍 `cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu -- -D warnings`。
-Windows CI 只 clippy sidecar，主程序的 Windows 分支只会在出包时编译，错了要等 tag 构建才暴露。
+Windows CI 也会 test + clippy 主程序，但一轮要 40 多分钟，本地先拦住能省一轮；
+建窗口的原生测试（如 `taskbar_docking` 的重绘、全屏用例）在 Mac 上跑不了，只能靠 CI。
 
 ## 发版
 
