@@ -1,0 +1,35 @@
+{
+  "date": "2026-10-18",
+  "base": "f6834bea3ebc14da3f40ea1efcaf446afca8b1be",
+  "pr41": {
+    "tree": "a548918bb48f6f5cd80ff0794d2ba34c4e78ef5a",
+    "commit": "bcc2eb5978eac7b3ef3c6f56d3e34ef8e369e4d0"
+  },
+  "pr42": {
+    "tree": "7ef3b7f224d48aeb6207181bb368d6ce8e3e5a8c",
+    "commit": "ad7e3a4ace6dd3ebeee2a6c32ed65df03e43a1ef"
+  },
+  "windows_pr42_exe_sha256": "914f28a96c1d7790c8c1b4c40a995a2ea86b8ebb0cee9150703729b3c1864224",
+  "checks": {
+    "each_pr": [
+      "Rust workspace tests passed",
+      "Windows workspace clippy -D warnings passed",
+      "cargo fmt --check passed",
+      "TypeScript typecheck passed",
+      "renderer build passed",
+      "Bun 1.4.3: 499 pass / 2 Windows symlink EPERM failures"
+    ],
+    "pr41_native": "same HWND fullscreen, timer-only recovery, polling disabled/resumed: 1 pass",
+    "pr42_native": "4 Explorer/tray menu cycles: all line scores 0; track title changed 电动少女 -> 全世界失眠, line score 0; full forced redraw pixel comparison no row differences"
+  },
+  "screenshots": {
+    "after-next.png": "3af767dfbf4a5aa0719c47c6fd1fb9cb3479be57c097ebd4552ea660ab674212",
+    "after-tray.png": "929db89876fff2d03dcad039e0d0261221cf9e953c7852a11feaa051fe130d76"
+  },
+  "pr42_submitted_head": {
+    "parent": "1501091b57413975b19483178544da4de76053c7",
+    "commit": "17c66f8922305ee1e0a10e050f121552000dcba8",
+    "tree": "01579e0068ce2cf3f41172d38394501bdc4321b8",
+    "tested_merge_tree": "7ef3b7f224d48aeb6207181bb368d6ce8e3e5a8c"
+  }
+}
