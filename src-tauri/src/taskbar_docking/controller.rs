@@ -41,6 +41,8 @@ const TASKBAR_SETTLE_MAX: Duration = Duration::from_millis(600);
 const OVERLAY_READY_TIMEOUT: Duration = Duration::from_millis(1500);
 /// The probe bounds each provider call to 1.5 s; longer means it is wedged.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Explorer can re-order windows in bursts; one raise per burst is enough.
+const RAISE_INTERVAL: Duration = Duration::from_millis(50);
 
 pub type OverlayFactory = Box<dyn Fn(&AppHandle) -> tauri::Result<WebviewWindow> + Send + Sync>;
 
@@ -244,6 +246,8 @@ struct Worker {
     /// Spawned on the first enable and kept for the app's lifetime.
     watcher: Option<Watcher>,
     overlay_listening: bool,
+    last_raise: Option<Instant>,
+    raise_due: Option<Instant>,
     aborting: bool,
 }
 
@@ -265,6 +269,8 @@ impl Worker {
             probe_serial: 0,
             watcher: None,
             overlay_listening: false,
+            last_raise: None,
+            raise_due: None,
             aborting: false,
         }
     }
@@ -311,6 +317,7 @@ impl Worker {
             self.probe
                 .running
                 .map(|(_, started)| started + PROBE_TIMEOUT),
+            self.raise_due,
         ]
         .into_iter()
         .flatten()
@@ -406,6 +413,10 @@ impl Worker {
             self.probe.rerun = false;
             self.probe.wedged = true;
             self.step(Event::Taskbars(None));
+        }
+        if self.raise_due.is_some_and(|due| due <= now) {
+            self.raise_due = None;
+            self.raise_now();
         }
         self.advance_flight();
     }
@@ -619,6 +630,18 @@ impl Worker {
     }
 
     fn raise(&mut self) {
+        let recent = self
+            .last_raise
+            .filter(|last| last.elapsed() < RAISE_INTERVAL);
+        match recent {
+            Some(last) if self.raise_due.is_none() => self.raise_due = Some(last + RAISE_INTERVAL),
+            Some(_) => {}
+            None => self.raise_now(),
+        }
+    }
+
+    fn raise_now(&mut self) {
+        self.last_raise = Some(Instant::now());
         if !lock(&self.inner.state).strip_visible() {
             return;
         }

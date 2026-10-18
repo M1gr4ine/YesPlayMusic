@@ -30,7 +30,7 @@ use std::{
 use windows::{
     core::{w, Result as WinResult},
     Win32::{
-        Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
         Graphics::{
             Dwm::DwmFlush,
             Gdi::{RedrawWindow, RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE},
@@ -57,17 +57,16 @@ use windows::{
             },
             WindowsAndMessaging::{
                 ChangeWindowMessageFilterEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
-                DispatchMessageW, GetClassNameW, GetClientRect, GetCursorPos, GetDesktopWindow,
-                GetGUIThreadInfo, GetMessageW, GetWindowThreadProcessId, IsWindowVisible,
-                KillTimer, PeekMessageW, PostMessageW, PostThreadMessageW, RegisterClassW,
-                RegisterWindowMessageW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
+                DispatchMessageW, GetClassNameW, GetClientRect, GetDesktopWindow, GetGUIThreadInfo,
+                GetMessageW, GetWindowThreadProcessId, KillTimer, PeekMessageW, PostThreadMessageW,
+                RegisterClassW, RegisterWindowMessageW, SetTimer, SetWindowPos, ShowWindow,
                 TranslateMessage, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_REORDER,
-                EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MENUEND, EVENT_SYSTEM_MOVESIZEEND,
-                EVENT_SYSTEM_MOVESIZESTART, GUITHREADINFO, GUI_INMOVESIZE, HWND_TOP, HWND_TOPMOST,
-                MSG, MSGFLT_ALLOW, OBJID_CLIENT, OBJID_WINDOW, PM_NOREMOVE, SET_WINDOW_POS_FLAGS,
-                SPI_SETWORKAREA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE,
-                WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT, WM_APP, WM_CONTEXTMENU, WM_DISPLAYCHANGE,
-                WM_QUIT, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
+                EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART,
+                GUITHREADINFO, GUI_INMOVESIZE, HWND_TOP, HWND_TOPMOST, MSG, MSGFLT_ALLOW,
+                OBJID_CLIENT, OBJID_WINDOW, PM_NOREMOVE, SET_WINDOW_POS_FLAGS, SPI_SETWORKAREA,
+                SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, WINDOW_EX_STYLE,
+                WINEVENT_OUTOFCONTEXT, WM_APP, WM_DISPLAYCHANGE, WM_QUIT, WM_SETTINGCHANGE,
+                WM_TIMER, WNDCLASSW, WS_OVERLAPPED,
             },
         },
     },
@@ -133,43 +132,6 @@ pub fn redraw(raw: usize) -> Result<(), String> {
     }
     .ok()
     .map_err(|error| format!("could not redraw the taskbar strip: {error}"))
-}
-
-pub fn show_taskbar_context_menu(raw: usize) -> WinResult<()> {
-    let overlay = hwnd(raw);
-    if !unsafe { IsWindowVisible(overlay) }.as_bool() {
-        return Ok(());
-    }
-    let mut point = POINT::default();
-    unsafe { GetCursorPos(&mut point)? };
-    if !contains_point(overlay, point) || fullscreen_foreground() {
-        return Ok(());
-    }
-    let Some(taskbar) = taskbar_windows()
-        .into_iter()
-        .find(|&window| contains_point(window, point))
-    else {
-        return Ok(());
-    };
-    if !unsafe { SetForegroundWindow(taskbar) }.as_bool() {
-        eprintln!("[taskbar-docking] could not foreground the taskbar context menu");
-    }
-    // WM_CONTEXTMENU carries signed 16-bit screen coordinates, including secondary displays.
-    let position = u32::from(point.x as u16) | (u32::from(point.y as u16) << 16);
-    unsafe {
-        PostMessageW(
-            Some(taskbar),
-            WM_CONTEXTMENU,
-            WPARAM(taskbar.0 as usize),
-            LPARAM(position as i32 as isize),
-        )
-    }
-}
-
-fn contains_point(window: HWND, point: POINT) -> bool {
-    win32::window_rect(window).is_some_and(|rect| {
-        point.x >= rect.x && point.x < rect.right() && point.y >= rect.y && point.y < rect.bottom()
-    })
 }
 
 pub fn hide(raw: usize) {
@@ -540,7 +502,6 @@ unsafe extern "system" fn taskbar_proc(
     _time: u32,
 ) {
     match event {
-        EVENT_SYSTEM_MENUEND if is_taskbar_class(window) => notify(HookEvent::TaskbarRaised),
         // Explorer also reports top-level Z-order changes on the desktop client.
         EVENT_OBJECT_REORDER
             if object == OBJID_WINDOW.0
@@ -594,7 +555,6 @@ struct ExplorerWatch {
     /// The taskbar and island windows the handlers were registered on.
     roots: Vec<usize>,
     events: HWINEVENTHOOK,
-    menu: HWINEVENTHOOK,
     automation: Option<IUIAutomation2>,
 }
 
@@ -617,28 +577,11 @@ impl ExplorerWatch {
                 )
             }
         };
-        let menu = if pid == 0 {
-            HWINEVENTHOOK::default()
-        } else {
-            // Menu dismissal can leave the taskbar foreground and unmoved.
-            unsafe {
-                SetWinEventHook(
-                    EVENT_SYSTEM_MENUEND,
-                    EVENT_SYSTEM_MENUEND,
-                    None,
-                    Some(taskbar_proc),
-                    pid,
-                    0,
-                    WINEVENT_OUTOFCONTEXT,
-                )
-            }
-        };
         let automation = (pid != 0).then(|| watch_structure(&roots)).flatten();
         Self {
             pid,
             roots,
             events,
-            menu,
             automation,
         }
     }
@@ -665,8 +608,6 @@ impl ExplorerWatch {
     fn unhook(&mut self) {
         unhook(self.events);
         self.events = HWINEVENTHOOK::default();
-        unhook(self.menu);
-        self.menu = HWINEVENTHOOK::default();
         if let Some(automation) = self.automation.take() {
             let _ = unsafe { automation.RemoveAllEventHandlers() };
         }

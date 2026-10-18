@@ -1,9 +1,7 @@
-//! Native frame and context-menu policy for the transparent taskbar strip.
+//! Native frame policy for the transparent taskbar strip.
 
-use tauri::{webview::PlatformWebview, WebviewWindow};
-use webview2_com::{
-    ContextMenuRequestedEventHandler, Microsoft::Web::WebView2::Win32::ICoreWebView2_11,
-};
+use crate::win32::hwnd;
+use tauri::WebviewWindow;
 use windows::{
     core::Result as WinResult,
     Win32::{
@@ -18,20 +16,13 @@ use windows::{
         },
     },
 };
-use windows_core::Interface;
-
-use super::attach;
-use crate::win32::hwnd;
 
 pub fn configure_overlay(window: &WebviewWindow) -> tauri::Result<()> {
     let raw = window.hwnd()?.0 as usize;
-    window.with_webview(move |webview| {
+    window.with_webview(move |_| {
         // Subclass helpers must run on the window's UI thread.
         if let Err(error) = configure_frame(hwnd(raw)) {
             eprintln!("[taskbar-docking] could not remove the strip native frame: {error}");
-        }
-        if let Err(error) = register(&webview, raw) {
-            eprintln!("[taskbar-docking] could not install the strip context menu: {error}");
         }
     })
 }
@@ -83,21 +74,4 @@ unsafe extern "system" fn frame_proc(
         lparam
     };
     unsafe { DefSubclassProc(window, message, wparam, lparam) }
-}
-
-fn register(webview: &PlatformWebview, raw: usize) -> WinResult<()> {
-    let core = unsafe { webview.controller().CoreWebView2()? }.cast::<ICoreWebView2_11>()?;
-    let handler = ContextMenuRequestedEventHandler::create(Box::new(move |_, args| {
-        if let Some(args) = args {
-            let result = unsafe { args.SetHandled(true) }
-                .and_then(|()| attach::show_taskbar_context_menu(raw));
-            if let Err(error) = result {
-                eprintln!("[taskbar-docking] could not open the taskbar context menu: {error}");
-            }
-        }
-        Ok(())
-    }));
-    // The WebView owns the handler; it captures no window or application reference.
-    let mut token = 0;
-    unsafe { core.add_ContextMenuRequested(&handler, &mut token) }
 }
