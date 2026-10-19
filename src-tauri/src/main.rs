@@ -2631,8 +2631,9 @@ fn create_main_window(
     let builder = builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true);
+    // Explicit opens focus separately; docking recovery must stay inactive.
     #[cfg(target_os = "windows")]
-    let builder = builder.decorations(false);
+    let builder = builder.decorations(false).focused(false);
     let window = builder
         .on_page_load(|_, payload| {
             if payload.event() == PageLoadEvent::Finished {
